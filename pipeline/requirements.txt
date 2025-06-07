@@ -1,0 +1,8 @@
+pandas
+web3[dev]
+python-dotenv
+numpy
+tqdm
+argparse
+requests
+datetime

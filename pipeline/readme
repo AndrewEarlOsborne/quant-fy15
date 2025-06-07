@@ -1,0 +1,23 @@
+## Script running
+
+### 1. Update .env file
+
+
+### 2. 
+from ethereum-validator-trader ~:
+
+```bash
+sudo apt-get install git python3-pip python3-full screen
+
+cd extration_pipeline
+
+python3 -m pip install --break-system-packages -r requirements.txt
+
+## Edit .env file as needed
+screen -S eth_extraction
+
+## Detach from screen using Ctrl + A, D
+
+# Run
+./extraction-pipeline/
+```

@@ -1,0 +1,395 @@
+# Ethereum Trading System - Technical Architecture
+
+A comprehensive machine learning-based automated trading system for Ethereum with modular data extraction, model development, and trading execution components.
+
+## 📋 Table of Contents
+
+- [System Overview](#system-overview)
+- [Architecture Diagram](#architecture-diagram)
+- [Project Structure](#project-structure)
+- [Technical Components](#technical-components)
+- [Docker Architecture](#docker-architecture)
+- [Data Flow](#data-flow)
+- [Component Interactions](#component-interactions)
+- [Setup and Deployment](#setup-and-deployment)
+- [Data Injection Methods](#data-injection-methods)
+- [Development Workflow](#development-workflow)
+- [Monitoring and Maintenance](#monitoring-and-maintenance)
+
+## 🏗️ System Overview
+
+The Ethereum Trading System is designed as a modular, containerized application that:
+
+1. **Extract** blockchain and market data daily
+2. **Processe** raw data into ML-ready features
+3. **Train** ensemble models on historical patterns
+4. **Predict** price movements with confidence scoring
+5. **Execute** trades based on model predictions
+6. **Monitor** performance and manages risk
+
+### Key Design Principles
+
+- **Modularity**: Clear separation between data extraction, model development, and trading
+- **Containerization**: Docker-based deployment for consistent environments
+- **File-based Storage**: No external databases for simplified deployment
+- **Fault Tolerance**: Graceful error handling and recovery mechanisms
+- **Observability**: Comprehensive logging and monitoring
+
+
+## 📁 Project Structure
+
+```
+## TODO
+```
+
+## 🔧 Technical Components
+
+### 1. Extraction Pipeline (`extraction-pipeline/`)
+
+- **`extraction_agent.py`**: Schedules and coordinates all data extraction tasks.
+- **`price_extractor.py`**: Collects OHLCV price data from Yahoo Finance.
+- **`whale_extractor.py`**: Detects and logs large Ethereum transactions.
+- **`validator_extractor.py`**: Gathers Ethereum validator and staking data.
+- **`blockchain_extractor.py`**: Extracts on-chain Ethereum metrics.
+- **`data_validator.py`**: Checks and validates the quality of extracted data.
+
+### 2. Model Development (`model-development/`)
+
+- **`model_trainer.py`**: Runs the full ML training workflow from data prep to model saving.
+- **`ensemble_builder.py`**: Builds and manages the stacking ensemble of base models and meta-classifier.
+- **`feature_engineer.py`**: Creates and transforms features for model input.
+- **`model_evaluator.py`**: Assesses model performance and metrics.
+- **`hyperparameter_tuner.py`**: Tunes model parameters automatically.
+- **`model_versioning.py`**: Handles saving, loading, and switching between model versions.
+
+### 3. Core Application (`src/`)
+
+- **`scheduler.py`**: Schedules daily predictions, weekly retraining, and system checks.
+- **`trading_engine.py`**: Executes trades and manages positions using exchange APIs.
+- **`data_manager.py`**: Handles file-based data storage, backups, and retention.
+
+## Data Flow
+
+Extraction, prediction, and execution for each day. (Daily at 23:00 UTC)
+### 1. Extraction Phase
+
+```
+External APIs → Raw Data → Validation → Storage
+     │              │           │          │
+     ▼              ▼           ▼          ▼
+[Yahoo Finance] → [OHLCV] → [Quality Check] → [data/raw/]
+[Whale Alert]   → [Txns]  → [Anomaly Det]  → [price_data.parquet]
+[Beacon Chain]  → [Valid] → [Completeness] → [whale_data.parquet]
+```
+
+### 2. Processing Phase
+
+```
+Raw Data → Feature Engineering → Feature Storage
+    │             │                    │
+    ▼             ▼                    ▼
+[Multiple     → [Technical        → [data/processed/]
+ Sources]       Indicators]        [featured_data.parquet]
+              [Lag Features]
+              [Aggregations]
+```
+
+### 3. Prediction Phase
+
+```
+Featured Data → Model Loading → Prediction → Trade Decision
+      │              │             │            │
+      ▼              ▼             ▼            ▼
+[Last 14 days] → [Ensemble    → [Class 0,1,2] → [BUY/SELL/HOLD]
+               Model]         [Confidence]    [Position Size]
+```
+
+### 4. Execution Phase (Immediate)
+
+```
+Trade Decision → Risk Check → Order Execution → Recording
+       │             │             │              │
+       ▼             ▼             ▼              ▼
+[BUY Signal]  → [Position   → [Exchange API] → [trade_history.json]
+[Confidence]    Size Calc]   [Order Placed]   [Performance Log]
+```
+
+## 🔗 Component Interactions
+
+### Startup Sequence
+
+1. **Container Initialization**
+2. 
+### Daily Workflow
+
+**Data Extraction**
+```python
+# extraction-pipeline/extraction_agent.py
+def daily_extraction():
+    results = {}
+    results['price'] = PriceExtractor().extract_daily_data()
+    results['whale'] = WhaleExtractor().extract_large_transactions()
+    results['validator'] = ValidatorExtractor().extract_network_data()
+    
+    # Validate all data sources
+    DataValidator().validate_daily_batch(results)
+    
+    # Store with timestamp
+    DataManager().store_daily_extraction(results)
+```
+
+**Feature Engineering**
+```python
+# model-development/feature_engineer.py
+def engineer_daily_features():
+    # Load raw data
+    raw_data = DataManager().load_latest_raw_data()
+    
+    # Apply feature engineering pipeline
+    features = FeatureEngineer().create_features(raw_data)
+    
+    # Store processed features
+    DataManager().store_featured_data(features)
+```
+
+**23:00 UTC - Prediction & Trading**
+```python
+# src/scheduler.py
+def prediction_and_trading():
+    # Load model and recent data
+    model = ModelLoader().load_production_model()
+    data = DataManager().get_prediction_data()
+    
+    # Make prediction
+    prediction, confidence = model.predict(data)
+    
+    # Execute trade if confident
+    if confidence > config.confidence_threshold:
+        TradingEngine().execute_trade(prediction, confidence)
+```
+
+### Model Training Workflow
+
+**Weekly Retraining (Sunday 02:00 UTC)**
+```python
+# model-development/model_trainer.py
+def retrain_production_model():
+    # 1. Data Preparation
+    training_data = DataManager().load_training_dataset(days=365)
+    
+    # 2. Feature Engineering
+    features = FeatureEngineer().create_training_features(training_data)
+    
+    # 3. Model Training
+    new_model = EnsembleBuilder().train_ensemble(features)
+    
+    # 4. Validation
+    performance = ModelEvaluator().evaluate_model(new_model)
+    
+    # 5. Deployment Decision
+    if performance.accuracy > current_model.accuracy:
+        ModelVersioning().deploy_new_model(new_model)
+```
+
+## 📥 Data Injection Methods
+
+### 1. Volume Mounting (Primary Method)
+
+**Real-time Data Injection**
+```bash
+# Host machine data preparation
+cp new_whale_data.parquet ./data-storage/raw/
+cp updated_features.parquet ./data-storage/processed/
+
+# Container automatically detects new files
+docker exec ethereum-trading-system \
+  python scripts/process_new_data.py
+```
+
+**Automated Extraction Pipeline**
+```bash
+# Trigger manual extraction
+docker exec ethereum-trading-system \
+  python scripts/data_extraction.py --date=2024-01-15
+
+# Bulk historical data loading
+docker exec ethereum-trading-system \
+  python scripts/backfill_data.py --start=2024-01-01 --end=2024-01-31
+```
+
+### 2. API Integration
+
+**External Data Sources**
+```python
+# extraction-pipeline/external_integrator.py
+class ExternalDataIntegrator:
+    def inject_custom_data(self, data_source, data_format):
+        """
+        Accepts data from external sources:
+        - REST API endpoints
+        - WebSocket streams
+        - Database exports
+        - CSV/JSON files
+        """
+        validator = DataValidator()
+        if validator.validate_schema(data_source, data_format):
+            DataManager().store_external_data(data_source)
+```
+
+### 3. Configuration-based Injection
+
+**Dynamic Data Source Configuration**
+```yaml
+# config/data_sources.yaml
+data_sources:
+  whale_data:
+    type: "api"
+    endpoint: "https://api.whale-alert.io/v1/transactions"
+    refresh_interval: 3600
+    validation_rules:
+      - min_value: 100
+      - max_age_hours: 24
+  
+  custom_indicators:
+    type: "file"
+    path: "/app/data/external/custom_indicators.parquet"
+    auto_reload: true
+```
+
+### 4. Real-time Stream Processing
+
+**Live Data Streaming**
+```python
+# extraction-pipeline/stream_processor.py
+class StreamProcessor:
+    def setup_real_time_feeds(self):
+        """
+        Establishes real-time data connections:
+        - WebSocket price feeds
+        - Ethereum node event streams
+        - Social sentiment APIs
+        """
+        self.price_stream = PriceStreamConnector()
+        self.blockchain_stream = BlockchainEventStream()
+        self.sentiment_stream = SentimentAnalysisStream()
+```
+
+## 🚀 Setup and Deployment
+
+### Prerequisites
+
+```bash
+# System requirements
+- Docker 20.10+
+- Docker Compose 2.0+
+- 4GB RAM minimum
+- 20GB disk space
+- Internet connection for data extraction
+```
+
+### Quick Start
+
+1. **Clone and Configure**
+```bash
+git clone <repository-url> ethereum-trading-system
+cd ethereum-trading-system
+
+# Copy and configure environment
+cp .env.example .env
+# Edit .env with your exchange API credentials
+```
+
+2. **Initial Setup**
+```bash
+# Create data directories
+mkdir -p data-storage/{raw,processed,models,trades,backups}
+mkdir -p logs
+mkdir -p config
+
+# Set permissions
+chmod 755 data-storage logs config
+```
+
+3. **Build and Deploy**
+```bash
+# Build container
+docker build -t ethereum-trading:latest .
+
+# Train initial model
+docker run --rm \
+  --env-file .env \
+  -v $(pwd)/data-storage:/app/data \
+  -v $(pwd)/logs:/app/logs \
+  ethereum-trading:latest \
+  python scripts/train_model.py
+
+# Deploy system
+./deploy.sh
+```
+
+### Advanced Deployment Options
+
+**Production Deployment**
+```bash
+# Cloud deployment with SSL and monitoring
+./deploy.sh --production \
+  --ssl-cert=/path/to/cert.pem \
+  --ssl-key=/path/to/key.pem \
+  --monitoring=prometheus
+```
+
+**Multi-Environment Setup**
+```bash
+# Development environment
+docker-compose -f docker-compose.dev.yml up -d
+
+# Staging environment  
+docker-compose -f docker-compose.staging.yml up -d
+
+# Production environment
+docker-compose -f docker-compose.prod.yml up -d
+```
+
+## 🔍 Monitoring and Maintenance
+
+### Health Monitoring
+
+**System Status Dashboard**
+```bash
+# Comprehensive system check
+docker exec ethereum-trading-system python scripts/check_status.py
+
+# Real-time monitoring
+./monitor.sh --follow
+
+# Performance metrics
+docker exec ethereum-trading-system python scripts/performance_report.py
+```
+
+**Automated Alerts**
+```python
+# src/notification_system.py
+class NotificationSystem:
+    def setup_alerts(self):
+        """
+        Configures monitoring alerts:
+        - Model prediction failures
+        - Data extraction errors
+        - Trading execution issues
+        - Performance degradation
+        """
+```
+
+
+## 🧪 Testing and Validation
+
+### Test Suites
+```bash
+# Run full test suite
+docker exec ethereum-trading-system python -m pytest tests/
+
+# Test specific components
+docker exec ethereum-trading-system python -m pytest tests/test_extraction.py
+docker exec ethereum-trading-system python -m pytest tests/test_models.py
+docker exec ethereum-trading-system python -m pytest tests/test_trading.py
+```

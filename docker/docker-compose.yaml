@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  eth-trading:
+    build: .
+    container_name: eth-bot
+    environment:
+      - EXCHANGE_SANDBOX=true
+      - LOG_LEVEL=INFO
+      - ENVIRONMENT=development
+    env_file:
+      - .env
+    volumes:
+      - ./app/data
+      - ./app/models
+      - ./app/logs
+    restart: no ## todo change to "on-failure[:3]"
+    ports:
+      - "8000:8000"
