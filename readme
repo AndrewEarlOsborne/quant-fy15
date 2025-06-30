@@ -244,7 +244,7 @@ class ExternalDataIntegrator:
 data_sources:
   whale_data:
     type: "api"
-    endpoint: "https://api.whale-alert.io/v1/transactions"
+    endpoint: 
     refresh_interval: 3600
     validation_rules:
       - min_value: 100

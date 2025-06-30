@@ -1,15 +1,16 @@
+# activate_agent.py
 """
 Entry point for the trading system to begin active modeling
 """
+
 import sys
-import os
 import logging
 from pathlib import Path
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from scheduler import TradingScheduler
+from trading_scheduler import TradingScheduler
 from config import config
 
 def main():

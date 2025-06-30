@@ -17,7 +17,4 @@ python3 -m pip install --break-system-packages -r requirements.txt
 screen -S eth_extraction
 
 ## Detach from screen using Ctrl + A, D
-
-# Run
-./extraction-pipeline/
 ```

@@ -8,8 +8,7 @@ import signal
 import sys
 import os
 from datetime import datetime, timedelta
-from ethereum_extractor_refactored import EthereumFeatureExtractor
-from generate_env import generate_env_file, parse_time_duration
+from ethereum_extractor import EthereumFeatureExtractor
 from dotenv import load_dotenv
 
 
@@ -192,7 +191,7 @@ class EthereumExtractionScheduler:
 def create_scheduler_config(schedule_freq='1h', lookback_dur='1h', output_file='.env'):
     
     config = {
-        'provider_url': 'https://mainnet.infura.io/v3/YOUR_PROJECT_ID',
+        'provider_url': 'https://eth.drpc.org',
         'start_date': datetime.now() - timedelta(hours=1),
         'end_date': datetime.now(),
         'observations': 10000,
