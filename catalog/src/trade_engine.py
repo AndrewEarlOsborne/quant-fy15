@@ -61,7 +61,7 @@ class TradingEngine:
                 'profit_loss': 0
             }
             
-            if prediction > 1 and confidence >= config.prediction_confidence_threshold:
+            if prediction > 1 and confidence >= 0.6:  # Default confidence threshold
                 # Buy signal
                 result = self._execute_buy(balances, current_price, confidence)
                 if result:
@@ -87,8 +87,10 @@ class TradingEngine:
         try:
             # Calculate position size based on risk and confidence
             usdt_balance = balances['USDT']
-            risk_amount = usdt_balance * config.risk_per_trade * confidence
-            max_position = usdt_balance * config.max_position_size
+            risk_per_trade = 0.02  # 2% risk per trade
+            max_position_size = 0.1  # 10% max position
+            risk_amount = usdt_balance * risk_per_trade * confidence
+            max_position = usdt_balance * max_position_size
             
             position_size = min(risk_amount, max_position)
             quantity = position_size / price
@@ -118,32 +120,32 @@ class TradingEngine:
             logger.error(f"Error executing buy order: {e}")
             return None
     
-    # def _execute_sell(self, balances: Dict, price: float) -> Optional[Dict]:
-    #     """Execute sell order"""
-    #     try:
-    #         eth_balance = balances['ETH']
+    def _execute_sell(self, balances: Dict, price: float) -> Optional[Dict]:
+        """Execute sell order"""
+        try:
+            eth_balance = balances['ETH']
             
-    #         if eth_balance < self.min_order_size:
-    #             logger.warning(f"ETH balance too low: {eth_balance}")
-    #             return None
+            if eth_balance < self.min_order_size:
+                logger.warning(f"ETH balance too low: {eth_balance}")
+                return None
             
-    #         logger.info(f"Executing SELL: {eth_balance:.6f} ETH at ${price:.2f}")
+            logger.info(f"Executing SELL: {eth_balance:.6f} ETH at ${price:.2f}")
             
-    #         if not config.exchange_sandbox:
-    #             order = self.exchange.create_market_sell_order(self.symbol, eth_balance)
-    #             order_id = order['id']
-    #             actual_quantity = order.get('filled', eth_balance)
-    #         else:
-    #             # Simulated order for sandbox
-    #             order_id = f"sim_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    #             actual_quantity = eth_balance
+            if not config.exchange_sandbox:
+                order = self.exchange.create_market_sell_order(self.symbol, eth_balance)
+                order_id = order['id']
+                actual_quantity = order.get('filled', eth_balance)
+            else:
+                # Simulated order for sandbox
+                order_id = f"sim_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                actual_quantity = eth_balance
             
-    #         return {
-    #             'action': 'SELL',
-    #             'quantity': actual_quantity,
-    #             'order_id': order_id
-    #         }
+            return {
+                'action': 'SELL',
+                'quantity': actual_quantity,
+                'order_id': order_id
+            }
             
-    #     except Exception as e:
-    #         logger.error(f"Error executing sell order: {e}")
-    #         return None
+        except Exception as e:
+            logger.error(f"Error executing sell order: {e}")
+            return None

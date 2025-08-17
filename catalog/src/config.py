@@ -18,7 +18,7 @@ class Config:
     
     # Data sources
     whale_data_api: str = os.getenv('WHALE_DATA_API', '')
-    ethereum_provider_node_url: str = os.getenv('ETHEREUM_PROVIDER_NODE_URL', '')
+    ETHEREUM_PROVIDER_URLS: str = os.getenv('ETHEREUM_PROVIDER_URLS', '')
     
     # Scheduling
     trigger_time: str = os.getenv('TRIGGER_TIME', '23:00') # Daily at 11 PM UTC

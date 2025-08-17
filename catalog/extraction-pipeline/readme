@@ -1,0 +1,52 @@
+# Ethereum Extraction Pipeline Architecture
+
+## Local Orchestration Plane
+**Location:** Your local machine  
+**Purpose:** Deploy, monitor, and collect results from VMs
+
+### Files:
+- `orchestrator.py` - Main orchestration logic
+- `main.py` - CLI interface for deploy/collect/status
+- `.env` - Configuration file
+- `requirements.txt` - Python dependencies
+- `setup.sh` - Environment setup script
+- `collected_data/` - Directory for aggregated results
+
+---
+
+## VM Extraction Code (Minimal Clone)
+**Location:** Cloned onto each VM  
+**Purpose:** Run extraction process independently
+
+### Files:
+- `extractor.py` - Core extraction logic
+- `requirements.txt` - Python dependencies for extraction
+- `startup.sh` - VM initialization script
+- `README.md` - Basic documentation
+
+---
+
+## Data Flow
+
+1. **Deploy Phase:** 
+   - Local orchestrator creates VMs with unique configs
+   - Each VM clones minimal extraction repo
+   - VMs start extraction in screen sessions
+
+2. **Monitor Phase:**
+   - Orchestrator can check VM status remotely
+   - VMs run independently until completion
+
+3. **Collection Phase:**
+   - Orchestrator downloads results from completed VMs
+   - Aggregates data locally
+   - Cleans up VMs
+
+---
+
+## Key Benefits
+
+- **Minimal VM footprint** - Only extraction code on VMs
+- **Independent operation** - VMs work without SSH connection
+- **Scalable** - Easy to add more VMs or change configs
+- **Fault tolerant** - VMs complete work even if orchestrator is offline

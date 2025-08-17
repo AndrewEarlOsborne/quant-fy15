@@ -1,11 +1,12 @@
 from validator_model import EthereumPricePredictionModel
+from utils import engineer_features
 
 import os
 from datetime import datetime
-import yfinance
+import yfinance as yf
 import pandas as pd
 
-prediction_interval = os.get_env('PREDICTION_INTERVAL')
+prediction_interval = os.getenv('PREDICTION_INTERVAL', '1d')
 
 model = EthereumPricePredictionModel(
     window_length=14,
@@ -17,10 +18,14 @@ model = EthereumPricePredictionModel(
 whales = pd.read_csv('aggregated_transactions.csv')
 validators = pd.read_csv('aggregated_validators.csv')
 
-start_date: datetime = min(whales['date'], validators['date'])
-end_date: datetime = min(whales['date'], validators['date'])
+# Convert date columns to datetime for comparison
+whales['date'] = pd.to_datetime(whales['date'])
+validators['date'] = pd.to_datetime(validators['date'])
 
-eth_data = yfinance.download('ETH-USD', start=start_date.date, end=end_date.date, interval=prediction_interval)
+start_date = min(whales['date'].min(), validators['date'].min())
+end_date = max(whales['date'].max(), validators['date'].max())
+
+eth_data = yf.download('ETH-USD', start=start_date.date(), end=end_date.date(), interval=prediction_interval)
 
 data_dict = model.prepare_data(eth_data, whales, validators)
 model.train(data_dict)
