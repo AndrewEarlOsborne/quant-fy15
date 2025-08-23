@@ -454,24 +454,109 @@ echo "Extraction started at $(date)" >> /tmp/startup-complete
 
 
 def validate_gcloud_setup() -> bool:
-    """Validate gcloud CLI setup."""
+    """Validate gcloud CLI setup with detailed debugging."""
+    print("🔍 Starting gcloud CLI validation...")
+    
     try:
-        # Check gcloud installation
+        # Step 1: Check if gcloud command exists
+        print("Step 1: Checking gcloud command availability...")
+        result = subprocess.run(['which', 'gcloud'], capture_output=True, text=True)
+        if result.returncode != 0:
+            print("❌ gcloud command not found in PATH")
+            print("   PATH contents:")
+            for path in os.environ.get('PATH', '').split(':'):
+                print(f"     {path}")
+            print("   Install Google Cloud SDK: https://cloud.google.com/sdk/docs/install")
+            return False
+        
+        gcloud_path = result.stdout.strip()
+        print(f"✅ Found gcloud at: {gcloud_path}")
+        
+        # Step 2: Check gcloud version and installation
+        print("Step 2: Checking gcloud version...")
         result = subprocess.run(['gcloud', 'version'], capture_output=True, text=True)
         if result.returncode != 0:
-            print("❌ gcloud CLI not installed or not working")
+            print("❌ gcloud CLI not working properly")
+            print(f"   Return code: {result.returncode}")
+            print(f"   STDERR: {result.stderr}")
+            print(f"   STDOUT: {result.stdout}")
             return False
             
-        # Check authentication
+        version_info = result.stdout.strip()
+        print("✅ gcloud version information:")
+        for line in version_info.split('\n')[:3]:  # First 3 lines
+            print(f"   {line}")
+        
+        # Step 3: Check authentication status
+        print("Step 3: Checking authentication status...")
         result = subprocess.run(['gcloud', 'auth', 'list', '--filter=status:ACTIVE', '--format=value(account)'], 
                               capture_output=True, text=True)
-        if not result.stdout.strip():
-            print("❌ Not authenticated with gcloud. Run: gcloud auth login")
+        if result.returncode != 0:
+            print("❌ Failed to check authentication status")
+            print(f"   Return code: {result.returncode}")
+            print(f"   STDERR: {result.stderr}")
             return False
             
-        print("✅ gcloud CLI configured and authenticated")
+        active_accounts = result.stdout.strip()
+        if not active_accounts:
+            print("❌ No active authenticated accounts found")
+            print("   Run: gcloud auth login")
+            print("   Or for service accounts: gcloud auth activate-service-account --key-file=KEY_FILE")
+            return False
+            
+        print("✅ Active authenticated accounts:")
+        for account in active_accounts.split('\n'):
+            if account.strip():
+                print(f"   {account}")
+        
+        # Step 4: Check current project
+        print("Step 4: Checking current project...")
+        result = subprocess.run(['gcloud', 'config', 'get-value', 'project'], 
+                              capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            current_project = result.stdout.strip()
+            print(f"✅ Current project: {current_project}")
+        else:
+            print("⚠️  No default project set")
+            print("   Set with: gcloud config set project PROJECT_ID")
+        
+        # Step 5: Check compute API access
+        print("Step 5: Testing Compute Engine API access...")
+        result = subprocess.run(['gcloud', 'compute', 'zones', 'list', '--limit=1', '--quiet'], 
+                              capture_output=True, text=True)
+        if result.returncode != 0:
+            print("❌ Cannot access Compute Engine API")
+            print(f"   Return code: {result.returncode}")
+            print(f"   STDERR: {result.stderr}")
+            print("   Possible issues:")
+            print("     - Compute Engine API not enabled")
+            print("     - Insufficient permissions")
+            print("     - Network connectivity issues")
+            return False
+            
+        print("✅ Compute Engine API accessible")
+        
+        # Step 6: Check SSH key setup
+        print("Step 6: Checking SSH key configuration...")
+        ssh_key_path = os.path.expanduser('~/.ssh/google_compute_engine')
+        if os.path.exists(ssh_key_path):
+            print("✅ Google Compute SSH key found")
+        else:
+            print("⚠️  Google Compute SSH key not found")
+            print("   Key will be auto-generated on first SSH connection")
+        
+        print("✅ gcloud CLI validation completed successfully")
         return True
         
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         print("❌ gcloud CLI not found. Please install Google Cloud SDK")
+        print(f"   Error: {e}")
+        print("   Install from: https://cloud.google.com/sdk/docs/install")
+        print("   Or via package manager:")
+        print("     macOS: brew install google-cloud-sdk")
+        print("     Ubuntu: apt-get install google-cloud-cli")
+        return False
+    except Exception as e:
+        print(f"❌ Unexpected error during gcloud validation: {e}")
+        print(f"   Error type: {type(e).__name__}")
         return False

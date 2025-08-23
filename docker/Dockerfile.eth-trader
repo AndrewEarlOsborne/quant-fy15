@@ -1,0 +1,42 @@
+FROM python:3.9-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    libpq-dev \
+    cron \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy trading requirements
+COPY docker/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy trading system code
+COPY catalog/src/ ./src/
+COPY model-development/ ./model-development/
+COPY .env .
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/data /app/models
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV ENVIRONMENT=production
+
+# Copy cron schedule for trading
+RUN echo "0 23 * * * cd /app && python src/activate_agent.py >> /app/logs/trading.log 2>&1" > /etc/cron.d/trading-cron
+RUN chmod 0644 /etc/cron.d/trading-cron
+RUN crontab /etc/cron.d/trading-cron
+
+# Health check for trading service
+HEALTHCHECK --interval=5m --timeout=10s --start-period=30s --retries=3 \
+  CMD python -c "import os; exit(0 if os.path.exists('/app/logs/trading.log') else 1)"
+
+# Expose port for monitoring (optional)
+EXPOSE 8000
+
+# Start cron and keep container running
+CMD ["sh", "-c", "cron && tail -f /dev/null"]

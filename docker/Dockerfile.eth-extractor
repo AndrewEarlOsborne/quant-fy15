@@ -1,0 +1,36 @@
+FROM python:3.9-slim
+
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    git \
+    curl \
+    gpg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && apt-get update -y && apt-get install google-cloud-cli -y
+
+# Copy extraction requirements
+COPY docker/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy extraction pipeline code
+COPY catalog/extraction-pipeline/ ./extraction-pipeline/
+COPY .env .
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/data /app/collected_data
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV ENVIRONMENT=production
+ENV LOCAL_DATA_DIR=/app/collected_data
+
+# Health check for extraction service
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD python -c "import os; exit(0 if os.path.exists('/app/logs') else 1)"
+
+# Default command - run extraction orchestrator
+CMD ["python", "extraction-pipeline/main.py"]

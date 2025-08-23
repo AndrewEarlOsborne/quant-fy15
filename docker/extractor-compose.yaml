@@ -1,0 +1,24 @@
+services:
+  eth-extractor:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.eth-extractor
+    container_name: eth-extractor
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - PYTHONPATH=/app
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS}
+    env_file:
+      - ../.env
+    volumes:
+      - ../data:/app/data
+      - ../logs:/app/logs
+      - ./collected_data:/app/collected_data
+    restart: no
+    networks:
+      - ethereum-network
+
+networks:
+  ethereum-network:
+    driver: bridge

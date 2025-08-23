@@ -1,34 +1,15 @@
 #!/usr/bin/env python3
 """
-Ethereum Extraction Pipeline - Main CLI
+Ethereum Extraction Pipeline
 =======================================
 
-Command-line interface for the Ethereum extraction orchestrator.
+Interface for the Ethereum extraction orchestrator.
 """
 
 import sys
 import json
 from datetime import datetime
 from orchestrator import EthereumOrchestrator, validate_gcloud_setup
-
-
-def show_usage():
-    """Display usage information."""
-    print("\n" + "="*50)
-    print("Ethereum Extraction Pipeline")
-    print("="*50)
-    print("Commands:")
-    print("  deploy   - Deploy VMs and start extraction")
-    print("  status   - Check status of deployed VMs")
-    print("  collect  - Collect results and cleanup VMs")
-    print("  help     - Show this help message")
-    print("="*50)
-    print("\nWorkflow:")
-    print("1. Edit .env with your configuration")
-    print("2. python3 main.py deploy")
-    print("3. python3 main.py status  (check progress)")
-    print("4. python3 main.py collect (when complete)")
-    print()
 
 
 def deploy_command():
@@ -206,33 +187,82 @@ def collect_command():
 
 
 def main():
-    """Main CLI entry point."""
-    if len(sys.argv) < 2:
-        show_usage()
-        return
-        
-    command = sys.argv[1].lower()
+    """Main CLI entry point - executes full extraction pipeline sequentially."""
+    start_time = datetime.now()
+    print("🚀 Starting Ethereum Extraction Pipeline")
+    print("=" * 60)
+    print(f"Extraction Pipeline Started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 60)
     
     try:
-        if command == "deploy":
-            success = deploy_command()
-        elif command == "status":
-            success = status_command()
-        elif command == "collect":
-            success = collect_command()
-        elif command in ["help", "--help", "-h"]:
-            show_usage()
-            success = True
-        else:
-            print(f"❌ Unknown command: {command}")
-            show_usage()
-            success = False
+        # Step 1: Deploy VMs
+        print("\n📍 STEP 1: Deploying VMs")
+        if not deploy_command():
+            print("❌ Pipeline failed at deployment step")
+            return False
             
-        sys.exit(0 if success else 1)
+        # Step 2: Monitor status until completion
+        print("\n📍 STEP 2: Monitoring extraction progress")
+        max_status_checks = 60  # Prevent infinite loops
+        check_count = 0
+        
+        while check_count < max_status_checks:
+            check_count += 1
+            print(f"\n🔍 Status check #{check_count}")
+            
+            if not status_command():
+                print("❌ Pipeline failed during status monitoring")
+                return False
+                
+            # Check if all VMs completed (basic check)
+            orchestrator = EthereumOrchestrator()
+            status = orchestrator.status()
+            
+            if status["status"] == "no_deployment":
+                print("⚠️  No deployment found during monitoring")
+                break
+                
+            vm_statuses = status.get('vm_statuses', {})
+            completed = sum(1 for vm_status in vm_statuses.values() if vm_status.get('extraction') == 'COMPLETED')
+            total_vms = len(vm_statuses)
+            
+            if completed == total_vms and total_vms > 0:
+                print("✅ All VMs completed extraction")
+                break
+                
+            print(f"⏳ Waiting for completion ({completed}/{total_vms} done)")
+            import time
+            time.sleep(30)  # Wait 30 seconds between checks
+            
+        # Step 3: Collect results
+        print("\n📍 STEP 3: Collecting results")
+        if not collect_command():
+            print("❌ Pipeline failed at collection step")
+            return False
+            
+        # Success summary
+        end_time = datetime.now()
+        duration = end_time - start_time
+        print("\n" + "=" * 60)
+        print("🎉 PIPELINE COMPLETED SUCCESSFULLY")
+        print("=" * 60)
+        print(f"Started:  {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Finished: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Duration: {duration}")
+        print("=" * 60)
+        return True
         
     except KeyboardInterrupt:
-        print("\n❌ Interrupted by user")
-        sys.exit(1)
+        print("\n\n⚠️  Pipeline interrupted by user")
+        print("   Run 'python3 main.py collect' to cleanup if needed")
+        return False
+        
+    except Exception as e:
+        end_time = datetime.now()
+        print(f"\n❌ Pipeline failed with error: {e}")
+        print(f"Failed after: {end_time - start_time}")
+        print("   Check logs and run 'python3 main.py collect' to cleanup")
+        return False
 
 
 if __name__ == "__main__":

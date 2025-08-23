@@ -117,7 +117,7 @@ The Makefile serves as a **comprehensive system controller** with 50+ commands o
 ```
 Local Orchestrator → GCP VM Fleet → Parallel Extraction → Data Aggregation
        ↓                 ↓               ↓                    ↓
-[CLI Commands]    [Auto-scaling VMs] [Time Windows]   [CSV Collection]
+Docker Controller    [Auto-scaling VMs] [Time Windows]   [CSV Collection]
        ↓                 ↓               ↓                    ↓  
 [Deploy/Monitor]  [Independent Proc] [Fault Tolerant] [Local Storage]
 ```

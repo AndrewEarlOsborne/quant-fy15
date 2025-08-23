@@ -17,15 +17,18 @@ DOCKER_COMPOSE := docker-compose
 DOCKER := docker
 PROJECT_NAME := ethereum-trading
 MODEL_IMAGE := $(PROJECT_NAME)-model
-EXTRACTION_IMAGE := $(PROJECT_NAME)-extraction
-TRADING_IMAGE := $(PROJECT_NAME)-trading
+EXTRACTION_IMAGE := eth-extractor
+TRADING_IMAGE := eth-trader
+DOCKER_DIR := docker
 
 # Environment variables
 ENV_FILE := .env
-DATA_DIR := /data
-MODELS_DIR := /models
-LOGS_DIR := /logs
+DATA_DIR := data
+MODELS_DIR := models
+LOGS_DIR := logs
 EXTRACTION_DIR := catalog/extraction-pipeline
+EXTRACTOR_COMPOSE := $(DOCKER_DIR)/extractor-compose.yaml
+TRADER_COMPOSE := $(DOCKER_DIR)/trader-compose.yaml
 
 # Colors for output
 GREEN := \033[0;32m
@@ -115,36 +118,60 @@ model-predict: ## Run model prediction
 	@$(DOCKER) exec $(PROJECT_NAME)-model python -m src.model.predict
 	@echo "$(GREEN)Model prediction complete$(NC)"
 
-# Data Extraction Commands (Legacy Docker-based)
-extraction-build: ## Build data extraction Docker image
-	@echo "$(GREEN)Building extraction image$(NC)"
-	@$(DOCKER) build -t $(EXTRACTION_IMAGE):latest -f Dockerfile.extraction .
-	@echo "$(GREEN)Extraction image built$(NC)"
+# ETH Extractor Docker Commands
+eth-extractor-build: ## Build eth-extractor Docker image
+	@echo "$(GREEN)Building eth-extractor image$(NC)"
+	@$(DOCKER) build -t $(EXTRACTION_IMAGE):latest -f $(DOCKER_DIR)/Dockerfile.eth-extractor .
+	@echo "$(GREEN)ETH extractor image built$(NC)"
 
-extraction-up: extraction-build ## Start data extraction service
-	@echo "$(GREEN)Starting extraction service$(NC)"
-	@$(DOCKER) run -d \
-		--name $(PROJECT_NAME)-extraction \
-		--restart unless-stopped \
-		--env-file $(ENV_FILE) \
-		-v $(PWD)/$(DATA_DIR):/app/data \
-		-v $(PWD)/$(LOGS_DIR):/app/logs \
-		$(EXTRACTION_IMAGE):latest
-	@echo "$(GREEN)Extraction service started$(NC)"
+eth-extractor-up: ## Start eth-extractor service using docker-compose
+	@echo "$(GREEN)Starting eth-extractor service$(NC)"
+	@$(DOCKER_COMPOSE) -f $(EXTRACTOR_COMPOSE) up -d
+	@echo "$(GREEN)ETH extractor service started$(NC)"
 
-extraction-down: ## Stop data extraction service
-	@echo "$(GREEN)Stopping extraction service$(NC)"
-	@$(DOCKER) stop $(PROJECT_NAME)-extraction 2>/dev/null || true
-	@$(DOCKER) rm $(PROJECT_NAME)-extraction 2>/dev/null || true
-	@echo "$(GREEN)Extraction service stopped$(NC)"
+eth-extractor-down: ## Stop eth-extractor service
+	@echo "$(GREEN)Stopping eth-extractor service$(NC)"
+	@$(DOCKER_COMPOSE) -f $(EXTRACTOR_COMPOSE) down
+	@echo "$(GREEN)ETH extractor service stopped$(NC)"
 
-extraction-logs: ## View extraction service logs
-	@$(DOCKER) logs -f $(PROJECT_NAME)-extraction
+eth-extractor-logs: ## View eth-extractor service logs
+	@$(DOCKER_COMPOSE) -f $(EXTRACTOR_COMPOSE) logs -f
 
-extraction-clean: extraction-down ## Clean extraction containers and images
-	@echo "$(GREEN)Cleaning extraction components$(NC)"
+eth-extractor-clean: eth-extractor-down ## Clean eth-extractor containers and images
+	@echo "$(GREEN)Cleaning eth-extractor components$(NC)"
 	@$(DOCKER) rmi $(EXTRACTION_IMAGE):latest 2>/dev/null || true
-	@echo "$(GREEN)Extraction components cleaned$(NC)"
+	@echo "$(GREEN)ETH extractor components cleaned$(NC)"
+
+# ETH Trader Docker Commands
+eth-trader-build: ## Build eth-trader Docker image
+	@echo "$(GREEN)Building eth-trader image$(NC)"
+	@$(DOCKER) build -t $(TRADING_IMAGE):latest -f $(DOCKER_DIR)/Dockerfile.eth-trader .
+	@echo "$(GREEN)ETH trader image built$(NC)"
+
+eth-trader-up: ## Start eth-trader service using docker-compose
+	@echo "$(GREEN)Starting eth-trader service$(NC)"
+	@$(DOCKER_COMPOSE) -f $(TRADER_COMPOSE) up -d
+	@echo "$(GREEN)ETH trader service started$(NC)"
+
+eth-trader-down: ## Stop eth-trader service
+	@echo "$(GREEN)Stopping eth-trader service$(NC)"
+	@$(DOCKER_COMPOSE) -f $(TRADER_COMPOSE) down
+	@echo "$(GREEN)ETH trader service stopped$(NC)"
+
+eth-trader-logs: ## View eth-trader service logs
+	@$(DOCKER_COMPOSE) -f $(TRADER_COMPOSE) logs -f
+
+eth-trader-clean: eth-trader-down ## Clean eth-trader containers and images
+	@echo "$(GREEN)Cleaning eth-trader components$(NC)"
+	@$(DOCKER) rmi $(TRADING_IMAGE):latest 2>/dev/null || true
+	@echo "$(GREEN)ETH trader components cleaned$(NC)"
+
+# Legacy extraction commands (maintained for backwards compatibility)
+extraction-build: eth-extractor-build ## Alias for eth-extractor-build
+extraction-up: eth-extractor-up ## Alias for eth-extractor-up  
+extraction-down: eth-extractor-down ## Alias for eth-extractor-down
+extraction-logs: eth-extractor-logs ## Alias for eth-extractor-logs
+extraction-clean: eth-extractor-clean ## Alias for eth-extractor-clean
 
 # New Cloud-based Extraction Pipeline Commands
 extraction-setup: ## Setup extraction pipeline environment
@@ -177,28 +204,32 @@ extraction-full-pipeline: extraction-deploy extraction-collect ## Run complete e
 	@echo "$(YELLOW)Use 'make extraction-status' to monitor progress$(NC)"
 	@echo "$(YELLOW)Use 'make extraction-collect' when complete$(NC)"
 
-# Trading System Commands
-trading-up: ## Start trading system
-	@echo "$(GREEN)Starting trading system$(NC)"
-	@python scripts/activate_agent.py &
-	@echo "$(GREEN)Trading system started$(NC)"
-
-trading-down: ## Stop trading system
-	@echo "$(GREEN)Stopping trading system$(NC)"
-	@pkill -f "activate_agent.py" || true
-	@echo "$(GREEN)Trading system stopped$(NC)"
-
-trading-logs: ## View trading system logs
-	@tail -f $(LOGS_DIR)/trading/trading.log
-
-trading-restart: trading-down trading-up ## Restart trading system
+# Trading System Commands (Legacy - use eth-trader commands instead)
+trading-up: eth-trader-up ## Alias for eth-trader-up
+trading-down: eth-trader-down ## Alias for eth-trader-down  
+trading-logs: eth-trader-logs ## Alias for eth-trader-logs
+trading-restart: eth-trader-down eth-trader-up ## Restart trading system
 
 # System Management Commands
-system-up: extraction-up model-up trading-up ## Start entire system (extraction + model + trading)
+system-up: eth-extractor-up eth-trader-up ## Start entire system (extractor + trader)
 	@echo "$(GREEN)All systems operational$(NC)"
 
-system-down: trading-down model-down extraction-down ## Stop entire system
+system-down: eth-trader-down eth-extractor-down ## Stop entire system
 	@echo "$(GREEN)All systems stopped$(NC)"
+
+# Combined docker-compose management
+eth-system-up: ## Start both extractor and trader services
+	@echo "$(GREEN)Starting complete ETH system$(NC)"
+	@$(DOCKER_COMPOSE) -f $(TRADER_COMPOSE) up -d
+	@echo "$(GREEN)ETH system operational$(NC)"
+
+eth-system-down: ## Stop both extractor and trader services
+	@echo "$(GREEN)Stopping complete ETH system$(NC)"
+	@$(DOCKER_COMPOSE) -f $(TRADER_COMPOSE) down
+	@echo "$(GREEN)ETH system stopped$(NC)"
+
+eth-system-logs: ## View logs from both services
+	@$(DOCKER_COMPOSE) -f $(TRADER_COMPOSE) logs -f
 
 system-restart: system-down system-up ## Restart entire system
 
@@ -214,7 +245,7 @@ system-status: ## Check status of all services
 	@echo "$(YELLOW)Cloud Extraction Pipeline:$(NC)"
 	@cd $(EXTRACTION_DIR) && python3 main.py status | grep -E "(deployment|VMs)" | head -3 || echo "  No active deployment"
 
-system-clean: model-clean extraction-clean ## Clean entire system
+system-clean: eth-trader-clean eth-extractor-clean ## Clean entire system
 	@echo "$(GREEN)Complete system cleanup$(NC)"
 	@$(DOCKER) system prune -a -f
 	@echo "$(GREEN)System cleanup complete$(NC)"
@@ -266,8 +297,8 @@ format: ## Format code
 	@echo "$(GREEN)Code formatted$(NC)"
 
 # Development shortcuts
-dev-up: extraction-up model-up ## Start development environment (no trading)
-dev-down: model-down extraction-down ## Stop development environment
+dev-up: eth-extractor-up ## Start development environment (extraction only)
+dev-down: eth-extractor-down ## Stop development environment
 dev-restart: dev-down dev-up ## Restart development environment
 
 # Cloud extraction development shortcuts
