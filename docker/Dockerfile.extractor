@@ -17,8 +17,9 @@ COPY docker/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy extraction pipeline code
-COPY catalog/extraction-pipeline/ ./extraction-pipeline/
+COPY catalog/extractor-pipeline/ ./extractor-pipeline/
 COPY .env .
+COPY google_auth_creds.json ./extractor-pipeline/google_auth_creds.json
 
 # Create necessary directories
 RUN mkdir -p /app/logs /app/data /app/collected_data
@@ -33,4 +34,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD python -c "import os; exit(0 if os.path.exists('/app/logs') else 1)"
 
 # Default command - run extraction orchestrator
-CMD ["python", "extraction-pipeline/main.py"]
+CMD ["python", "extractor-pipeline/main.py"]

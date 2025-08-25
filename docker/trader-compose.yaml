@@ -1,48 +1,35 @@
 version: '3.8'
 
 services:
-  eth-trader:
+  trader:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.eth-trader
-    container_name: eth-trader
+      dockerfile: docker/Dockerfile.trader
+    container_name: trader
     environment:
       - EXCHANGE_SANDBOX=true
       - LOG_LEVEL=INFO
       - ENVIRONMENT=production
       - PYTHONPATH=/app
+      - MODEL_TRAINING=true
+      - LIVE_EXTRACTION=true
+      - TRADING_ENABLED=true
     env_file:
       - ../.env
     volumes:
       - ../data:/app/data
       - ../models:/app/models
       - ../logs:/app/logs
-    restart: unless-stopped
+      - ../model-development:/app/model-development
+      - ../catalog/src:/app/catalog/src
+    restart: no
     ports:
       - "8000:8000"
     networks:
       - ethereum-network
-    depends_on:
-      - eth-extractor
+    # mem_limit: 8g
+    # cpus: '4.0'
 
-  eth-extractor:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.eth-extractor
-    container_name: eth-extractor
-    environment:
-      - ENVIRONMENT=production
-      - LOG_LEVEL=INFO
-      - PYTHONPATH=/app
-    env_file:
-      - ../.env
-    volumes:
-      - ../data:/app/data
-      - ../logs:/app/logs
-      - ./collected_data:/app/collected_data
-    restart: unless-stopped
-    networks:
-      - ethereum-network
 
 networks:
   ethereum-network:

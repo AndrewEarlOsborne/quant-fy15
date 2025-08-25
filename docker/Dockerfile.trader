@@ -27,9 +27,9 @@ ENV PYTHONPATH=/app
 ENV ENVIRONMENT=production
 
 # Copy cron schedule for trading
-RUN echo "0 23 * * * cd /app && python src/activate_agent.py >> /app/logs/trading.log 2>&1" > /etc/cron.d/trading-cron
-RUN chmod 0644 /etc/cron.d/trading-cron
-RUN crontab /etc/cron.d/trading-cron
+RUN echo "0 23 * * * cd /app && python src/activate_agent.py >> /app/logs/trading.log 2>&1" > /etc/cron.d/trader-cron
+RUN chmod 0644 /etc/cron.d/trader-cron
+RUN crontab /etc/cron.d/trader-cron
 
 # Health check for trading service
 HEALTHCHECK --interval=5m --timeout=10s --start-period=30s --retries=3 \

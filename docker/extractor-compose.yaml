@@ -1,14 +1,17 @@
 services:
-  eth-extractor:
+  extractor:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.eth-extractor
-    container_name: eth-extractor
+      dockerfile: docker/Dockerfile.extractor
+    container_name: extractor
     environment:
       - ENVIRONMENT=production
       - LOG_LEVEL=INFO
       - PYTHONPATH=/app
-      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS}
+      - GCC_OPTIMIZATION=true
+      - CC=gcc
+      - CXX=g++
+      - CFLAGS=-O3 -march=native
     env_file:
       - ../.env
     volumes:
@@ -16,6 +19,8 @@ services:
       - ../logs:/app/logs
       - ./collected_data:/app/collected_data
     restart: no
+    # mem_limit: 4g
+    # cpus: '2.0'
     networks:
       - ethereum-network
 

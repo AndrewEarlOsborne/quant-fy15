@@ -14,69 +14,68 @@ A comprehensive machine learning-based automated trading system for Ethereum wit
 
 ## 🏗️ System Overview
 
-The Ethereum Trading System consists of three main architectural components:
+The Ethereum Trading System uses a **two-container architecture** optimized for performance and simplicity:
 
-1. **Cloud Extraction Pipeline** - Scalable VM-based data collection
-2. **ML Model Development** - Feature engineering and ensemble modeling
-3. **Trading Control Plane** - Automated execution and portfolio management
+1. **Extractor Container** - Pre-training data extraction with GCC-optimized processing
+2. **Trader Container** - Unified model training, live extraction, and automated trading
 
 ### Key Design Principles
 
-- **Modularity**: Clear separation between extraction, modeling, and trading
-- **Scalability**: Cloud-based extraction using multiple VMs
+- **Two-Stage Processing**: Pre-training extraction + unified trading operations
+- **Performance Optimization**: GCC-compiled components for high-speed data processing
 - **Containerization**: Docker-based deployment for consistent environments
 - **File-based Storage**: No external databases for simplified deployment
-- **Fault Tolerance**: Graceful error handling and recovery mechanisms
+- **Unified Architecture**: Model training, live extraction, and trading in single container
 
 ## 🔧 Architecture Components
 
-### 1. Cloud Extraction Pipeline (`catalog/extraction-pipeline/`)
+### 1. Extractor Container (`docker/Dockerfile.extractor`)
 
-**Local Orchestration Plane:**
-- `main.py` - CLI interface for VM deployment and management
-- `orchestrator.py` - Core VM orchestration and data collection logic
-- Manages VM lifecycle: deploy → monitor → collect → cleanup
+**GCC-Optimized Processing:**
+- High-performance C/C++ components for blockchain data extraction
+- Historical data collection and preprocessing
+- Feature engineering with technical indicators
+- Optimized data structures for memory efficiency
 
-**VM Extraction Workers:**
-- Automatically cloned minimal extraction codebase on each VM
-- Independent operation with time-partitioned data extraction
-- Fault-tolerant processing with status reporting
+**Pre-training Data Pipeline:**
+- Raw blockchain data ingestion and validation
+- Technical indicator calculation (moving averages, RSI, MACD)
+- Whale transaction analysis and aggregation
+- Validator performance metrics extraction
 
 **Data Flow:**
 ```
-Local Machine → GCP VMs → Parallel Extraction → Data Aggregation → Local Storage
-     ↓              ↓             ↓                ↓                    ↓
-[Deploy Command] [VM Fleet] [Time Windows] [CSV Collection] [catalog/data/]
+Raw Blockchain Data → GCC Processing → Feature Engineering → Clean Dataset
+        ↓                   ↓               ↓                    ↓
+[Historical Data]    [C/C++ Optimized]  [Technical Indicators] [CSV Output]
 ```
 
-### 2. Model Development (`model-development/`)
+### 2. Trader Container (`docker/Dockerfile.trader`)
 
-**Core Components:**
-- `validator_model.py` - Stacking ensemble ML model (TCN + Transformer + XGBoost)
-- `main.py` - Model training and evaluation pipeline
-- `utils.py` - Feature engineering utilities
+**Unified Operations:**
+- `model-development/validator_model.py` - Stacking ensemble ML model (TCN + Transformer + XGBoost)
+- `catalog/src/trade_engine.py` - Exchange integration and order execution
+- `catalog/src/trading_scheduler.py` - Live data extraction and trading automation
+- `model-development/utils.py` - Feature engineering utilities
 
-**Model Architecture:**
+**Integrated Pipeline:**
 ```
-Raw Data → Feature Engineering → Ensemble Training → Prediction
-    ↓             ↓                    ↓               ↓
-[Price+Whale+  [Technical        [TCN+Transform+   [3-class
- Validator]     Indicators]        XGB+Meta]        prediction]
+Live Data → Model Training → Prediction → Risk Management → Trading
+    ↓           ↓              ↓            ↓               ↓
+[Real-time]  [Ensemble ML]   [3-class]    [Position Size] [Exchange API]
 ```
 
-### 3. Trading Control Plane (`catalog/src/`)
-
-**Control Components:**
-- `trade_engine.py` - Exchange integration and order execution
-- `trading_scheduler.py` - Automated prediction and trading schedule
+**Trading Components (within Trader Container):**
 - `data_manager.py` - File-based data storage and management
 - `config.py` - System configuration management
+- Live extraction for real-time trading decisions
+- Automated risk management and position sizing
 
-**Trading Flow:**
+**Unified Trading Flow:**
 ```
-Scheduled Trigger → Load Model → Make Prediction → Risk Check → Execute Trade
-        ↓               ↓            ↓             ↓           ↓
-[Daily 23:00 UTC] [Load Latest] [Confidence] [Position Size] [Exchange API]
+Live Extraction → Model Inference → Risk Check → Execute Trade
+       ↓               ↓            ↓           ↓
+[Real-time Data] [Latest Model] [Position Size] [Exchange API]
 ```
 
 ## 📁 Project Structure
@@ -85,7 +84,7 @@ Scheduled Trigger → Load Model → Make Prediction → Risk Check → Execute 
 Ethereum-Validator-Trader/
 ├── Makefile                          # Central control interface
 ├── catalog/
-│   ├── extraction-pipeline/          # Cloud extraction orchestration
+│   ├── extractor-pipeline/          # Cloud extraction orchestration
 │   │   ├── main.py                   # CLI for VM deployment
 │   │   ├── orchestrator.py           # VM management logic
 │   │   └── readme                    # Pipeline architecture docs
@@ -113,15 +112,13 @@ Ethereum-Validator-Trader/
 
 ## 🌊 Data Flow
 
-### 1. Extraction Phase (Cloud-based)
+### 1. Pre-Training Extraction Phase (GCC-Optimized)
 ```
-Orchestrator → VM Fleet → Parallel Processing → Data Collection
-     ↓              ↓             ↓                    ↓
-[main.py deploy] [GCP VMs]  [Time Windows]    [CSV Files]
-                     ↓             ↓                    ↓
-              [Clone Repo]  [Extract Data]      [Status Updates]
-                     ↓             ↓                    ↓
-              [Run Scripts] [Independent]       [Completion Flag]
+Extractor Container → GCC Processing → Feature Engineering → Dataset Output
+         ↓                   ↓               ↓                    ↓
+[Raw Blockchain]    [C/C++ Optimized]  [Technical Indicators] [Clean CSV]
+         ↓                   ↓               ↓                    ↓
+[Historical Data]   [High Performance]  [Whale Analysis]       [Model Ready]
 ```
 
 ### 2. Model Training Phase
@@ -133,13 +130,13 @@ Aggregated Data → Feature Engineering → Model Training → Model Persistence
 [Price+Whale+Val] [Lag Features+Stats] [TCN+Transform+XGB] [model/ dir]
 ```
 
-### 3. Trading Phase (Automated)
+### 3. Live Trading Phase (Unified Container)
 ```
-Schedule Trigger → Load Model → Feature Prep → Prediction → Trade Execution
-       ↓              ↓           ↓            ↓              ↓
-[Daily 23:00]   [Latest Model] [Recent Data] [Classification] [Exchange API]
-       ↓              ↓           ↓            ↓              ↓
-[Cron Job]      [Load Weights] [14-day Win]  [0,1,2 Class]  [Order Placed]
+Live Extraction → Model Training → Prediction → Risk Check → Trade Execution
+       ↓              ↓             ↓            ↓              ↓
+[Real-time Data] [Ensemble ML]   [3-class]   [Position Size] [Exchange API]
+       ↓              ↓             ↓            ↓              ↓
+[Feature Eng]    [TCN+Trans+XGB] [Confidence] [Risk Limits]   [Order Placed]
 ```
 
 ## 🚀 Makefile Controller
@@ -154,25 +151,18 @@ make system-down       # Stop entire system
 make system-status     # Check status of all services
 ```
 
-### Extraction Pipeline
+### Container Management
 ```bash
-make extraction-deploy    # Deploy VMs and start cloud extraction
-make extraction-status    # Check VM status and progress
-make extraction-collect   # Collect results and cleanup VMs
+make extractor-up        # Start pre-training extraction container
+make trader-up          # Start unified trading container
+make system-up          # Start both containers
 ```
 
-### Model Operations
+### Trading Operations (Unified)
 ```bash
-make model-train          # Train new model version
-make model-predict        # Run prediction with current model
-make model-up            # Start model service container
-```
-
-### Trading Operations
-```bash
-make trading-up          # Start automated trading agent
-make trading-down        # Stop trading agent
-make trading-logs        # View trading logs
+make trader-up          # Start trading container (includes model training)
+make trader-down        # Stop trading container
+make trader-logs        # View trading logs
 ```
 
 ## 🛠️ Setup and Deployment
@@ -181,9 +171,9 @@ make trading-logs        # View trading logs
 ```bash
 # System requirements
 - Docker 20.10+
-- Google Cloud SDK (for extraction pipeline)
+- GCC compiler (for optimized extraction)
 - Python 3.8+
-- 4GB RAM minimum
+- 8GB RAM minimum
 - 20GB disk space
 ```
 
@@ -191,8 +181,8 @@ make trading-logs        # View trading logs
 1. **Environment Setup**
 ```bash
 # Clone repository
-git clone <repository-url> ethereum-trading-system
-cd ethereum-trading-system
+git clone <repository-url> ethereum-trader-system
+cd ethereum-trader-system
 
 # Configure environment
 cp template.env .env
@@ -204,75 +194,66 @@ cp template.env .env
 # Setup data directories
 make setup
 
-# Deploy extraction pipeline
-make extraction-deploy
+# Start pre-training extraction
+make extractor-up
 
-# Train initial model (after data collection)
-make model-train
-
-# Start trading system
-make trading-up
+# Start trading system (includes model training and live trading)
+make trader-up
 ```
 
-### Cloud Extraction Configuration
+### Container Configuration
 ```bash
-# Configure .env for extraction pipeline
-GCP_PROJECT_ID=your-project-id
-EXTRACTION_REPO=https://github.com/your-org/extraction-repo
+# Configure .env for extraction and trading
+ETHEREUM_PROVIDER_URLS=url1,url2,url3
+BINANCE_API_KEY=your-api-key
+BINANCE_SECRET=your-secret
 START_DATE=2024-01-01-00:00
 END_DATE=2024-12-31-23:59
-NUM_VMS=10
-ETHEREUM_PROVIDER_URLS=url1,url2,url3
+GCC_OPTIMIZATION_FLAGS=-O3 -march=native
 ```
 
 ## 🔄 Development Workflow
 
-### 1. Data Collection
+### 1. Pre-Training Data Extraction
 ```bash
-# Deploy extraction VMs
-make extraction-deploy
+# Start GCC-optimized extraction
+make extractor-up
 
-# Monitor progress
-make extraction-status
+# Monitor extraction logs
+make extractor-logs
 
-# Collect results when complete
-make extraction-collect
+# Stop when data collection complete
+make extractor-down
 ```
 
-### 2. Model Development
+### 2. Trading Operations
 ```bash
-# Start development environment
-make dev-up
+# Start unified trading container
+make trader-up
 
-# Train new model version
-make model-train
+# View trading logs (includes model training)
+make trader-logs
 
-# Evaluate model performance
-make model-predict
+# Monitor system status
+make system-status
 ```
 
-### 3. Trading Deployment
+### 3. System Management
 ```bash
-# Start trading system
+# Start both containers
 make system-up
 
 # Monitor system status
 make system-status
 
-# View logs
+# View aggregated logs
 make logs
-```
 
-### 4. Maintenance
-```bash
 # Clean up system
 make clean
 
 # Backup data and models
 make backup
-
-# Update model with new data
-make model-retrain
 ```
 
 ## 📊 Monitoring and Observability
@@ -280,15 +261,14 @@ make model-retrain
 ### System Health Checks
 ```bash
 make system-status        # Overall system health
-make extraction-status    # VM extraction progress
-make model-logs          # Model training/prediction logs
-make trading-logs        # Trading execution logs
+make extractor-logs      # Pre-training extraction logs
+make trader-logs        # Trading execution logs
 ```
 
 ### Performance Monitoring
 - Model accuracy and F1 score tracking
 - Trading performance metrics
-- VM extraction completion rates
+- GCC-optimized extraction performance
 - Exchange API latency monitoring
 
 ## 🔒 Security and Risk Management
@@ -306,21 +286,22 @@ make trading-logs        # Trading execution logs
 
 ## 🚀 Production Deployment
 
-### Cloud Deployment
+### Production Deployment
 ```bash
-# Deploy to cloud with full monitoring
-make cloud-deploy
-
-# Production system startup
+# Build and start both containers
 make system-up
 
 # Enable monitoring alerts
 make monitor
+
+# View system resource usage
+make monitor
 ```
 
-### Scaling Considerations
-- Increase VM count for larger data extraction
+### Performance Considerations
+- GCC optimization flags for extraction performance
+- Container resource allocation and limits
 - Model retraining frequency adjustment
 - Trading frequency and position sizing optimization
 
-This architecture provides a comprehensive, scalable solution for automated Ethereum trading with clear separation of concerns and robust operational capabilities.
+This streamlined two-container architecture provides an optimized solution for automated Ethereum trading with GCC-enhanced performance and unified operational capabilities.

@@ -27,8 +27,8 @@ if ! command -v docker &> /dev/null; then
     sudo usermod -aG docker $USER
 fi
 
-sudo docker stop ethereum-trading-system 2>/dev/null || true
-sudo docker rm ethereum-trading-system 2>/dev/null || true
+sudo docker stop ethereum-trader-system 2>/dev/null || true
+sudo docker rm ethereum-trader-system 2>/dev/null || true
 
 sudo docker build -t ethereum-trading:latest .
 sudo ./deploy.sh

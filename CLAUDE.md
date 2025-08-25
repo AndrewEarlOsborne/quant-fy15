@@ -8,32 +8,29 @@ This document explains the architectural analysis, structural improvements, and 
 
 ### Current System Architecture
 
-The project implements a **distributed machine learning trading system** with three main components:
+The project implements a **two-container machine learning trading system** with streamlined architecture:
 
-1. **Cloud Extraction Pipeline** (`catalog/extraction-pipeline/`)
-   - Local orchestration plane for VM management
-   - Scalable cloud-based data collection using Google Cloud Platform
-   - Parallel extraction across multiple VMs with time partitioning
+1. **Extractor Container** (`docker/Dockerfile.extractor`)
+   - Pre-training data extraction with GCC-fueled performance optimization
+   - Historical blockchain data collection and preprocessing
+   - Optimized C/C++ components for high-speed data processing
+   - Outputs clean, feature-engineered datasets for model training
 
-2. **ML Model Development** (`model-development/`)
+2. **Trader Container** (`docker/Dockerfile.trader`)
+   - Unified container handling model training, live extraction, and trading
    - Stacking ensemble model combining TCN, Transformer, and XGBoost
-   - Feature engineering for price, whale transaction, and validator data
-   - Automated training and evaluation pipelines
-
-3. **Trading Control Plane** (`catalog/src/`)
-   - Automated trading agent with risk management
-   - Exchange API integration (Binance)
-   - Scheduled prediction and execution system
+   - Real-time data extraction for live trading decisions
+   - Automated trading agent with risk management and exchange integration
 
 ### Key Architectural Patterns Identified
 
-#### 1. **Orchestrator Pattern** (Extraction Pipeline)
+#### 1. **Dual-Stage Processing Pattern** (Two-Container Architecture)
 ```python
-# Local orchestrator manages remote VM fleet
-class EthereumOrchestrator:
-    def deploy() -> Dict[str, str]     # Create and configure VMs
-    def status() -> Dict               # Monitor extraction progress  
-    def collect() -> Dict[str, str]    # Gather results and cleanup
+# Stage 1: Pre-training extraction with GCC optimization
+Extractor Container: Raw Blockchain → GCC Processing → Clean Dataset
+
+# Stage 2: Unified ML and trading operations
+Trader Container: [Model Training + Live Extraction + Trading]
 ```
 
 #### 2. **Stacking Ensemble Pattern** (ML Model)
@@ -42,10 +39,10 @@ class EthereumOrchestrator:
 Base Models: [TCN, Transformer, XGBoost] → Meta Classifier → Final Prediction
 ```
 
-#### 3. **Event-Driven Trading Pattern** (Control Plane)
+#### 3. **Unified Trading Pipeline** (Single Container)
 ```python
-# Scheduled trigger → Prediction → Risk Check → Execution
-Schedule (23:00 UTC) → Model Inference → Position Sizing → Exchange Order
+# Live extraction → Model inference → Risk check → Execution
+Live Data → Feature Engineering → Prediction → Position Sizing → Exchange Order
 ```
 
 ## Structural Issues Fixed
@@ -100,26 +97,27 @@ The Makefile serves as a **comprehensive system controller** with 50+ commands o
 
 ### Command Categories
 - **Setup Commands**: `install`, `setup`, `clean`
-- **Model Commands**: `model-build`, `model-train`, `model-predict`
-- **Extraction Commands**: `extraction-deploy`, `extraction-status`, `extraction-collect`
-- **Trading Commands**: `trading-up`, `trading-down`, `trading-logs`
+- **Extractor Commands**: `extractor-build`, `extractor-up`, `extractor-down`
+- **Trader Commands**: `trader-build`, `trader-up`, `trader-down`, `trader-logs`
 - **System Management**: `system-up`, `system-down`, `system-status`
 
 ### Key Features
-- **Dual Extraction Modes**: Legacy Docker-based + New cloud-based VM pipeline
+- **Two-Container Architecture**: Extractor for pre-training + Trader for live operations
+- **GCC Optimization**: High-performance C/C++ extraction components
+- **Unified Operations**: Model training, live extraction, and trading in single container
 - **Development Shortcuts**: `dev-up`, `dev-down`, `quick-status`
 - **Emergency Controls**: `emergency-stop`, `system-clean`
 - **Monitoring Tools**: `monitor`, `logs`, `backup`
 
 ## Data Flow Architecture
 
-### 1. Extraction Flow (Cloud-Native)
+### 1. Pre-Training Extraction Flow (GCC-Optimized)
 ```
-Local Orchestrator → GCP VM Fleet → Parallel Extraction → Data Aggregation
-       ↓                 ↓               ↓                    ↓
-Docker Controller    [Auto-scaling VMs] [Time Windows]   [CSV Collection]
-       ↓                 ↓               ↓                    ↓  
-[Deploy/Monitor]  [Independent Proc] [Fault Tolerant] [Local Storage]
+Extractor Container → GCC Processing → Feature Engineering → Clean Dataset
+       ↓                   ↓                ↓                    ↓
+[Raw Blockchain]    [C/C++ Optimized]  [Technical Indicators] [CSV Output]
+       ↓                   ↓                ↓                    ↓
+[Historical Data]   [High Performance]  [Lag Features]        [Model Ready]
 ```
 
 ### 2. Model Training Flow
@@ -132,24 +130,25 @@ Raw Data → Feature Engineering → Ensemble Training → Model Persistence
  Validator]     Aggregations]          XGB+Meta]
 ```
 
-### 3. Trading Execution Flow  
+### 3. Unified Trading Flow (Single Container)
 ```
-Schedule Trigger → Model Loading → Prediction → Risk Management → Order Execution
+Live Extraction → Model Training → Prediction → Risk Management → Order Execution
        ↓              ↓             ↓            ↓                ↓
-[Cron 23:00 UTC]  [Load Weights]  [3-class]    [Position Size]  [Exchange API]
+[Real-time Data]  [Ensemble ML]   [3-class]    [Position Size]  [Exchange API]
        ↓              ↓             ↓            ↓                ↓
-[Daily Automated] [Latest Model]  [Confidence] [Risk Limits]    [Market Orders]
+[Feature Eng]     [TCN+Trans+XGB] [Confidence] [Risk Limits]    [Market Orders]
 ```
 
 ## Technology Stack Analysis
 
 ### Infrastructure
-- **Cloud Platform**: Google Cloud Platform (Compute Engine)
-- **Containerization**: Docker + Docker Compose
-- **Orchestration**: Custom Python orchestrator + Makefile controller
+- **Containerization**: Two-container Docker architecture
+- **Orchestration**: Docker Compose + Makefile controller
+- **Performance**: GCC-optimized extraction components
 
 ### Data Processing
-- **Extraction**: Custom Python scripts on VM fleet
+- **Pre-training Extraction**: GCC-compiled C/C++ for high-speed processing
+- **Live Extraction**: Real-time Python-based data collection
 - **Storage**: File-based (CSV/Parquet) for simplicity
 - **Aggregation**: Pandas-based data pipeline
 
@@ -167,9 +166,9 @@ Schedule Trigger → Model Loading → Prediction → Risk Management → Order 
 ## Operational Capabilities
 
 ### Deployment Options
-1. **Local Development**: `make dev-up` (extraction + model, no trading)
-2. **Full System**: `make system-up` (all components)
-3. **Cloud Production**: `make cloud-deploy` (scalable deployment)
+1. **Pre-training Phase**: `make extractor-up` (historical data extraction with GCC optimization)
+2. **Trading Phase**: `make trader-up` (model training + live extraction + trading)
+3. **Full System**: `make system-up` (both containers operational)
 
 ### Monitoring & Maintenance
 - **Health Checks**: `make system-status` (all services)
@@ -177,11 +176,11 @@ Schedule Trigger → Model Loading → Prediction → Risk Management → Order 
 - **Backup/Restore**: `make backup` / `make restore`
 - **Performance**: Model metrics + trading performance tracking
 
-### Scalability Features
-- **Horizontal Scaling**: Configurable VM count for extraction
-- **Time Partitioning**: Automatic date range splitting across VMs
-- **Fault Tolerance**: Independent VM operation + retry logic
-- **Resource Management**: Configurable machine types and disk sizes
+### Performance Features
+- **GCC Optimization**: High-performance C/C++ extraction components
+- **Containerized Isolation**: Separate extraction and trading environments
+- **Memory Efficiency**: Optimized data structures and processing
+- **Resource Management**: Container-level resource allocation and limits
 
 ## Security and Risk Controls
 
@@ -222,6 +221,13 @@ Schedule Trigger → Model Loading → Prediction → Risk Management → Order 
 - **Error Tracking**: Integrate Sentry for error monitoring
 - **Performance Profiling**: Add APM tools
 - **Business Metrics**: Trading performance dashboards
+
+## Code and comment styles
+### 1. Emojis
+Do not use emojies for log statements, outputs, in bash files, scripts, or otherwise. Do not use emojis.
+
+### 2. Inline Code Comments
+Only add comments for difficult to read or otherwise complex operations. For example, for a function whose purpose is clear based on the function name, expected codeblocks with basic functionality, and otherwise, greatly reduce the amount of comments that are provided.
 
 ## Conclusion
 
