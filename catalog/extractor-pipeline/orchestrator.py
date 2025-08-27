@@ -13,7 +13,7 @@ import subprocess
 import pandas as pd
 import signal
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Set
 from dotenv import load_dotenv
@@ -91,14 +91,13 @@ class EthereumOrchestrator:
         self.disk_size = os.getenv('GCP_BOOT_DISK_SIZE', '10GB')
         self.data_dir = os.getenv('LOCAL_DATA_DIR', 'collected_data')
         self.check_interval = int(os.getenv('MONITOR_CHECK_INTERVAL', '300'))  # Reduced to 5 minutes
-        self.vm_timeout = int(os.getenv('VM_TIMEOUT_MINUTES', '120'))  # 2 hour timeout per VM
         
         # VM extraction parameters
         self.vm_config = {
-            'interval_type': os.getenv('INTERVAL_SPAN_TYPE', 'day'),
-            'interval_length': os.getenv('INTERVAL_SPAN_LENGTH', '1.0'),
-            'observations': os.getenv('OBSERVATIONS_PER_INTERVAL', '100'),
-            'delay': os.getenv('PROVIDER_FETCH_DELAY_SECONDS', '0.05')
+            'interval_type': os.getenv('EXTRACTION_INTERVAL_UNIT', 'day'),
+            'interval_length': os.getenv('EXTRACTION_INTERVAL_LENGTH', '1.0'),
+            'observations': os.getenv('EXTRACTION_OBSERVATIONS_PER_INTERVAL', '100'),
+            'delay': os.getenv('EXTRACTION_PROVIDER_FETCH_DELAY_SECONDS', '0.05')
         }
         
     def _get_vm_names(self) -> List[str]:
@@ -173,7 +172,7 @@ chown -R ethereum:ethereum /home/ethereum
 
 # Clone repository
 log_step "CLONE" "Cloning extraction repository"
-sudo -u ethereum git clone {self.extraction_repo} extraction 2>&1 | tee -a "$LOGFILE" || {{
+git clone {self.extraction_repo} extraction 2>&1 | tee -a "$LOGFILE" || {{
     log_step "ERROR" "Repository clone failed"
     exit 1
 }}
@@ -202,46 +201,65 @@ sudo -u ethereum cat > .env << 'EOF'
 ETHEREUM_PROVIDER_URL={provider_url}
 START_DATE={vm_start}
 END_DATE={vm_end}
-OBSERVATIONS_PER_INTERVAL={self.vm_config['observations']}
-PROVIDER_FETCH_DELAY_SECONDS={self.vm_config['delay']}
-INTERVAL_SPAN_TYPE={self.vm_config['interval_type']}
-INTERVAL_SPAN_LENGTH={self.vm_config['interval_length']}
+EXTRACTION_OBSERVATIONS_PER_INTERVAL={self.vm_config['observations']}
+EXTRACTION_PROVIDER_FETCH_DELAY_SECONDS={self.vm_config['delay']}
+EXTRACTION_INTERVAL_UNIT={self.vm_config['interval_type']}
+EXTRACTION_INTERVAL_LENGTH={self.vm_config['interval_length']}
 DATA_DIRECTORY=data
 LOG_LEVEL=INFO
 EOF
 log_step "CONFIG" "Configuration file created"
 
-# Create extraction startup script with logging
+# Create extraction startup script with proper error handling and logging
 sudo -u ethereum cat > start_extraction.sh << 'EOF'
 #!/bin/bash
+set -e
 cd /home/ethereum/extraction
 source venv/bin/activate
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') [EXTRACT] Starting extraction process" >> /home/ethereum/logs/extraction.log
-python3 extractor.py 2>&1 | tee -a /home/ethereum/logs/extraction.log
+# Ensure log directory exists
+mkdir -p /home/ethereum/logs
 
-exit_code=$?
-if [ $exit_code -eq 0 ]; then
+# Mark extraction as starting
+echo "STARTING" > status.txt
+echo "$(date '+%Y-%m-%d %H:%M:%S') [EXTRACT] Starting extraction process" >> /home/ethereum/logs/extraction.log
+
+# Run extraction with proper error handling
+if python3 extractor.py 2>&1 | tee -a /home/ethereum/logs/extraction.log; then
     echo "COMPLETED" > status.txt
     echo "$(date '+%Y-%m-%d %H:%M:%S') [EXTRACT] Extraction completed successfully" >> /home/ethereum/logs/extraction.log
 else
+    exit_code=$?
     echo "ERROR" > status.txt
     echo "$(date '+%Y-%m-%d %H:%M:%S') [EXTRACT] Extraction failed with exit code $exit_code" >> /home/ethereum/logs/extraction.log
+    exit $exit_code
 fi
 EOF
 
 chmod +x start_extraction.sh
 chown ethereum:ethereum start_extraction.sh
 
-# Start extraction in screen session with logging
-log_step "SCREEN" "Starting extraction in screen session"
-sudo -u ethereum screen -dmS extraction bash -c "/home/ethereum/extraction/start_extraction.sh"
+# Ensure screen can run properly by setting up the environment
+log_step "SCREEN" "Preparing screen environment"
+sudo -u ethereum bash -c "cd /home/ethereum/extraction && pwd > /tmp/screen-test.log"
 
-# Verify screen session started
-sleep 2
-SCREEN_STATUS=$(sudo -u ethereum screen -list | grep extraction || echo "NOT_FOUND")
+# Start extraction in screen session with proper session handling
+log_step "SCREEN" "Starting extraction in screen session"
+sudo -u ethereum bash -c "cd /home/ethereum/extraction && screen -dmS extraction ./start_extraction.sh"
+
+# Wait briefly and verify screen session started properly
+sleep 3
+SCREEN_STATUS=$(sudo -u ethereum screen -list 2>/dev/null | grep extraction || echo "NOT_FOUND")
 log_step "SCREEN" "Screen session status: $SCREEN_STATUS"
 echo "$SCREEN_STATUS" > "$SCREENFILE"
+
+# Additional verification - check if extraction status file was created
+if [ -f "/home/ethereum/extraction/status.txt" ]; then
+    EXTRACT_STATUS=$(cat /home/ethereum/extraction/status.txt)
+    log_step "SCREEN" "Extraction status: $EXTRACT_STATUS"
+else
+    log_step "WARNING" "Extraction status file not yet created"
+fi
 
 # Create monitoring script
 sudo -u ethereum cat > monitor_extraction.sh << 'EOF'
@@ -283,14 +301,9 @@ log_step "STATUS" "=== Startup Script Complete ==="
         '''
 
     def _create_vm(self, vm_name: str, vm_index: int) -> bool:
-        """Create and configure a single VM."""
+        """Create and configure a single VM (startup script will be executed via SSH)."""
         try:
-            # Create temporary startup script
-            script_file = f"/tmp/startup-{vm_name}.sh"
-            with open(script_file, 'w') as f:
-                f.write(self._create_startup_script(vm_index))
-            
-            # Create VM instance
+            # Create VM instance without startup script metadata (will be executed via SSH)
             cmd = [
                 "gcloud", "compute", "instances", "create", vm_name,
                 "--project", self.project_id,
@@ -299,7 +312,6 @@ log_step "STATUS" "=== Startup Script Complete ==="
                 "--image-family", "ubuntu-2204-lts",
                 "--image-project", "ubuntu-os-cloud",
                 "--boot-disk-size", self.disk_size,
-                "--metadata-from-file", f"startup-script={script_file}",
                 "--tags", "ethereum-extractor",
                 "--scopes", "https://www.googleapis.com/auth/cloud-platform",
                 "--quiet"
@@ -314,9 +326,6 @@ log_step "STATUS" "=== Startup Script Complete ==="
             else:
                 self.logger.error(f"Failed to create VM {vm_name}: {result.stderr}")
             
-            # Clean up script file
-            if os.path.exists(script_file):
-                os.remove(script_file)
             return success
             
         except subprocess.TimeoutExpired:
@@ -324,8 +333,6 @@ log_step "STATUS" "=== Startup Script Complete ==="
             return False
         except Exception as e:
             self.logger.error(f"Exception creating VM {vm_name}: {e}")
-            if 'script_file' in locals() and os.path.exists(script_file):
-                os.remove(script_file)
             return False
             
     def _check_vm_status(self, vm_name: str) -> Dict[str, str]:
@@ -344,32 +351,63 @@ log_step "STATUS" "=== Startup Script Complete ==="
             if vm_status != "RUNNING":
                 return {"status": vm_status, "extraction": "VM_NOT_RUNNING"}
             
-            # Check extraction status via SSH with screen monitoring
+            # Check extraction status via SSH with comprehensive monitoring
             ssh_cmd = ["gcloud", "compute", "ssh", vm_name,
                       "--project", self.project_id, "--zone", self.zone,
-                      "--command", "ls -la /home/ethereum/extraction/data/*.csv 2>/dev/null | wc -l; cat /home/ethereum/extraction/status.txt 2>/dev/null || echo 'NO_STATUS'; sudo -u ethereum screen -list 2>/dev/null | grep extraction | wc -l || echo '0'; cat /tmp/startup-status.log 2>/dev/null | tail -3 || echo 'NO_LOGS'",
+                      "--command", '''
+                      echo "FILES:$(find /home/ethereum/extraction/data -name "*.csv" 2>/dev/null | wc -l || echo 0)"
+                      echo "STATUS:$(cat /home/ethereum/extraction/status.txt 2>/dev/null || echo NO_STATUS)"
+                      echo "SCREENS:$(sudo -u ethereum screen -list 2>/dev/null | grep extraction | wc -l || echo 0)"
+                      echo "STARTUP:$(grep -c "STARTUP_COMPLETE" /tmp/startup-complete 2>/dev/null || echo 0)"
+                      echo "EXTRACTION_LOG:$(tail -1 /home/ethereum/logs/extraction.log 2>/dev/null || echo NO_LOG)"
+                      ''',
                       "--quiet"]
             
-            ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True)
+            ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=30)
             
             if ssh_result.returncode == 0:
-                lines = ssh_result.stdout.strip().split('\n')
-                try:
-                    file_count = int(lines[0] or "0")
-                except ValueError:
-                    file_count = 0
+                output_lines = ssh_result.stdout.strip().split('\n')
                 
-                status_text = lines[1] if len(lines) > 1 else "NO_STATUS"
-                screen_count = int(lines[2] or "0") if len(lines) > 2 else 0
-                startup_logs = '\n'.join(lines[3:]) if len(lines) > 3 else "NO_LOGS"
+                # Parse the structured output
+                file_count = 0
+                status_text = "NO_STATUS"
+                screen_count = 0
+                startup_complete = False
+                extraction_log = "NO_LOG"
                 
-                if "COMPLETED" in status_text:
+                for line in output_lines:
+                    if line.startswith("FILES:"):
+                        try:
+                            file_count = int(line.split(":")[1])
+                        except (ValueError, IndexError):
+                            file_count = 0
+                    elif line.startswith("STATUS:"):
+                        status_text = line.split(":", 1)[1] if ":" in line else "NO_STATUS"
+                    elif line.startswith("SCREENS:"):
+                        try:
+                            screen_count = int(line.split(":")[1])
+                        except (ValueError, IndexError):
+                            screen_count = 0
+                    elif line.startswith("STARTUP:"):
+                        try:
+                            startup_complete = int(line.split(":")[1]) > 0
+                        except (ValueError, IndexError):
+                            startup_complete = False
+                    elif line.startswith("EXTRACTION_LOG:"):
+                        extraction_log = line.split(":", 1)[1] if ":" in line else "NO_LOG"
+                
+                # Determine extraction status based on comprehensive checks
+                if status_text == "COMPLETED":
                     extraction_status = "COMPLETED"
+                elif status_text == "ERROR":
+                    extraction_status = "ERROR"
+                elif status_text == "STARTING" and screen_count > 0:
+                    extraction_status = "RUNNING"
                 elif file_count > 0:
                     extraction_status = "RUNNING"
                 elif screen_count > 0:
                     extraction_status = "SCREEN_RUNNING"
-                elif "STARTUP_COMPLETE" in startup_logs:
+                elif startup_complete:
                     extraction_status = "STARTING"
                 else:
                     extraction_status = "INITIALIZING"
@@ -379,7 +417,8 @@ log_step "STATUS" "=== Startup Script Complete ==="
                     "extraction": extraction_status, 
                     "files": file_count,
                     "screen_sessions": screen_count,
-                    "startup_logs": startup_logs
+                    "startup_complete": startup_complete,
+                    "last_log": extraction_log
                 }
             else:
                 return {"status": "RUNNING", "extraction": "SSH_FAILED"}
@@ -648,37 +687,6 @@ log_step "STATUS" "=== Startup Script Complete ==="
         results["processed_vms"] = len(processed_vms)
         return results
         
-    def check_vm_timeouts(self) -> Dict[str, str]:
-        """Check for VMs that have exceeded timeout and clean them up."""
-        state = self._load_deployment_state()
-        if not state:
-            return {"status": "no_deployment"}
-            
-        deployment_time = datetime.fromisoformat(state["deployment_time"])
-        current_time = datetime.now()
-        timeout_threshold = deployment_time + timedelta(minutes=self.vm_timeout)
-        
-        results = {}
-        timed_out_vms = []
-        
-        if current_time > timeout_threshold:
-            self.logger.warning(f"VM timeout threshold exceeded ({self.vm_timeout} minutes)")
-            
-            # Check which VMs are still not completed
-            for vm_name in state["vm_names"]:
-                vm_status = self._check_vm_status(vm_name)
-                
-                if vm_status.get("extraction") not in ["COMPLETED"]:
-                    self.logger.warning(f"VM {vm_name} timed out, forcing cleanup")
-                    
-                    # Force delete timed out VM
-                    delete_success = self._delete_vm(vm_name, force=True)
-                    results[f"{vm_name}_timeout_delete"] = "SUCCESS" if delete_success else "FAILED"
-                    if delete_success:
-                        timed_out_vms.append(vm_name)
-                        
-        results["timed_out_vms"] = len(timed_out_vms)
-        return results
             
     def deploy(self) -> Dict[str, str]:
         """Deploy VMs and start extraction with error handling."""
@@ -712,6 +720,7 @@ log_step "STATUS" "=== Startup Script Complete ==="
                         if success:
                             results[vm_name] = "DEPLOYED"
                             successful_vms.append(vm_name)
+
                         else:
                             results[vm_name] = "FAILED"
                             failed_vms.append(vm_name)
@@ -724,6 +733,7 @@ log_step "STATUS" "=== Startup Script Complete ==="
             if successful_vms:
                 self._save_deployment_state(successful_vms, deployment_time)
                 self.logger.info(f"Successfully deployed {len(successful_vms)}/{len(vm_names)} VMs")
+                self._ssh_startup(successful_vms)
             else:
                 self.logger.error("No VMs deployed successfully")
                 
@@ -849,6 +859,56 @@ log_step "STATUS" "=== Startup Script Complete ==="
             except Exception as cleanup_e:
                 self.logger.error(f"Cleanup also failed: {cleanup_e}")
                 return {"status": "collection_failed", "error": str(e), "cleanup_error": str(cleanup_e)}
+            
+    def _ssh_startup(self, vm_names: List[str]):
+        """SSH into each VM and execute the startup script directly."""
+        for i, vm_name in enumerate(vm_names):
+            try:
+                # Generate the startup script for this specific VM
+                startup_script = self._create_startup_script(i)
+                
+                # Create a temporary script file locally
+                local_script_path = f"/tmp/startup-{vm_name}.sh"
+                with open(local_script_path, 'w') as f:
+                    f.write(startup_script)
+                    self.logger.info(f"Created local startup script for {vm_name}")
+                
+                self.logger.info(f"Uploading and executing startup script on {vm_name}")
+                
+                # Copy the script to the VM
+                scp_cmd = [
+                    "gcloud", "compute", "scp", local_script_path,
+                    f"{vm_name}:/tmp/startup-script.sh",
+                    "--project", self.project_id, "--zone", self.zone,
+                    "--quiet"
+                ]
+                subprocess.run(scp_cmd, capture_output=True, text=True, timeout=60)
+                
+                # Execute the script on the VM
+                ssh_cmd = [
+                    "gcloud", "compute", "ssh", vm_name,
+                    "--project", self.project_id, "--zone", self.zone,
+                    "--command", "sudo chmod +x /tmp/startup-script.sh && sudo /tmp/startup-script.sh",
+                    "--quiet"
+                ]
+                
+                result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=1800)  # 30 min timeout
+                
+                if result.returncode == 0:
+                    self.logger.info(f"Startup script executed successfully on {vm_name}")
+                else:
+                    self.logger.error(f"Startup script failed on {vm_name}: {result.stderr}")
+                
+                # Clean up local script file
+                if os.path.exists(local_script_path):
+                    os.remove(local_script_path)
+                    
+            except Exception as e:
+                self.logger.error(f"SSH startup execution failed for {vm_name}: {e}")
+                # Clean up local script file on error
+                local_script_path = f"/tmp/startup-{vm_name}.sh"
+                if os.path.exists(local_script_path):
+                    os.remove(local_script_path)
 
 
 def validate_gcloud_setup() -> bool:

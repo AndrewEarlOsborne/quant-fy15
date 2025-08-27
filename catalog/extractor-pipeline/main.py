@@ -7,6 +7,7 @@ Interface for the Ethereum extraction orchestrator.
 """
 
 import sys
+import time
 from datetime import datetime
 from orchestrator import EthereumOrchestrator, validate_gcloud_setup
 import os
@@ -34,8 +35,7 @@ def deploy_command():
         print(f"   Machine type: {orchestrator.machine_type}")
         print(f"   Zone: {orchestrator.zone}")
         print(f"   Data directory: {orchestrator.data_dir}")
-        print(f"   VM timeout: {orchestrator.vm_timeout} minutes")
-        print(f"   Check interval: {orchestrator.check_interval} seconds")            
+        print(f"   Check interval: {orchestrator.check_interval/60000} seconds")            
         
 
         # DEPLOYMENT
@@ -66,7 +66,6 @@ def deploy_command():
             print(f"\nDeployment completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             print("   VMs are now running extraction processes")
             print("   Use 'python3 main.py status' to monitor progress")
-            print(f"   Automatic cleanup enabled with {orchestrator.vm_timeout} minute timeout")
         else:
             print("\nERROR: No VMs deployed successfully")
             return False
@@ -97,21 +96,22 @@ def status_command():
         
         if status["status"] == "no_deployment":
             print("No active deployment found")
-            return True
+            return {"status": "no_deployment"}
             
         # Display deployment info
         print(f"Deployment time: {status['deployment_time']}")
         print(f"Total VMs: {status['total_vms']}")
         print()
         
-        # Count statuses
+        # Count statuses with enhanced status detection
         vm_statuses = status['vm_statuses']
         running = sum(1 for vm_status in vm_statuses.values() if vm_status.get('extraction') == 'RUNNING')
         completed = sum(1 for vm_status in vm_statuses.values() if vm_status.get('extraction') == 'COMPLETED')
         starting = sum(1 for vm_status in vm_statuses.values() if vm_status.get('extraction') == 'STARTING')
         screen_running = sum(1 for vm_status in vm_statuses.values() if vm_status.get('extraction') == 'SCREEN_RUNNING')
         initializing = sum(1 for vm_status in vm_statuses.values() if vm_status.get('extraction') == 'INITIALIZING')
-        failed = len(vm_statuses) - running - completed - starting - screen_running - initializing
+        error = sum(1 for vm_status in vm_statuses.values() if vm_status.get('extraction') == 'ERROR')
+        failed = len(vm_statuses) - running - completed - starting - screen_running - initializing - error
         
         print(f"Status Summary:")
         print(f"   Completed: {completed}")
@@ -119,9 +119,10 @@ def status_command():
         print(f"   Screen Running: {screen_running}")
         print(f"   Starting: {starting}")
         print(f"   Initializing: {initializing}")
+        print(f"   Error: {error}")
         print(f"   Failed/Other: {failed}")
         
-        # Show detailed status
+        # Show detailed status with enhanced information
         if len(vm_statuses) <= 10:  # Show details for small deployments
             print(f"\nDetailed Status:")
             for vm_name, vm_status in vm_statuses.items():
@@ -136,17 +137,30 @@ def status_command():
                 
                 files = vm_status.get('files', 0)
                 screens = vm_status.get('screen_sessions', 0)
-                print(f"   {status_icon} {vm_name}: {files} files, {screens} screens")
+                startup_complete = vm_status.get('startup_complete', False)
+                last_log = vm_status.get('last_log', 'NO_LOG')[:50]  # Truncate log
+                
+                print(f"   {status_icon} {vm_name}: {files} files, {screens} screens, startup: {'YES' if startup_complete else 'NO'}")
+                if last_log != 'NO_LOG':
+                    print(f"      Last log: {last_log}")
         
-        # Provide guidance
-        if completed == len(vm_statuses):
+        # Provide guidance and return status info for main loop
+        all_completed = completed == len(vm_statuses)
+        if all_completed:
             print(f"\nAll VMs completed! Run 'python3 main.py collect' to gather results")
         elif completed > 0:
-            print(f"\n{completed} VMs completed, {running + starting} still processing")
+            print(f"\n{completed} VMs completed, {running + starting + screen_running + initializing} still processing")
         else:
             print(f"\nAll VMs still processing.")
-            
-        return True
+        
+        # Return structured status for main loop
+        return {
+            "all_completed": all_completed,
+            "completed": completed,
+            "total": len(vm_statuses),
+            "running": running + starting + screen_running,
+            "status": "active"
+        }
         
     except Exception as e:
         print(f"Status check failed: {e}")
@@ -233,7 +247,7 @@ def main():
             
         # Step 2: Monitor status until completion
         logger.info("STEP 2: Monitoring extraction progress")
-        check_interval = int(os.getenv('MONITOR_CHECK_INTERVAL_SECONDS', '120000'))  # = 20 mins
+        check_interval = int(os.getenv('MONITOR_CHECK_INTERVAL_MINUTES', '20')) * 60 * 1000
         
         while True:
             status_result = status_command()
@@ -248,8 +262,8 @@ def main():
             elif isinstance(status_result, dict):
                 logger.info(f"Progress: {status_result['completed']}/{status_result['total']} VMs completed")
             
-            logger.info(f"Waiting {check_interval} seconds before next check...")
-            
+            logger.info(f"Waiting {check_interval/60000} minutes before next check...")
+            time.sleep(check_interval/1000)
         # Step 3: Collect results
         logger.info("STEP 3: Collecting results")
         if not collect_command():

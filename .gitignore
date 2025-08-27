@@ -1,2 +1,7 @@
 .env
 google_auth_creds.json
+logs/
+__pycache__/
+**/__pycache__/
+*.pyc
+data/

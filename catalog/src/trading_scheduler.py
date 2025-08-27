@@ -36,10 +36,10 @@ class EthereumExtractionScheduler:
         if os.path.exists(config_file):
             load_dotenv(config_file)
             self.provider_urls = [str(os.getenv('ETHEREUM_PROVIDER_URL'))]
-            self.observations_per_interval = int(os.getenv('OBSERVATIONS_PER_INTERVAL', '10000'))
+            self.EXTRACTION_OBSERVATIONS_PER_INTERVAL = int(os.getenv('EXTRACTION_OBSERVATIONS_PER_INTERVAL', '10000'))
             self.delay = float(os.getenv('DELAY_SECONDS', '0.05'))
-            self.interval_span_type = os.getenv('INTERVAL_SPAN_TYPE', 'hour')
-            self.interval_span_length = float(os.getenv('INTERVAL_SPAN_LENGTH', '1.0'))
+            self.EXTRACTION_INTERVAL_UNIT = os.getenv('EXTRACTION_INTERVAL_UNIT', 'hour')
+            self.EXTRACTION_INTERVAL_LENGTH = float(os.getenv('EXTRACTION_INTERVAL_LENGTH', '1.0'))
             self.data_directory = os.getenv('DATA_DIRECTORY', 'data')
             self.schedule_frequency = os.getenv('SCHEDULE_FREQUENCY', '1h')
             self.lookback_duration = os.getenv('LOOKBACK_DURATION', '1h')
@@ -73,10 +73,10 @@ class EthereumExtractionScheduler:
             
             extractor.start_date = start_time
             extractor.end_date = end_time
-            extractor.observations_per_interval = self.observations_per_interval
+            extractor.EXTRACTION_OBSERVATIONS_PER_INTERVAL = self.EXTRACTION_OBSERVATIONS_PER_INTERVAL
             extractor.delay = self.delay
-            extractor.interval_span_type = self.interval_span_type
-            extractor.interval_span_length = self.interval_span_length
+            extractor.EXTRACTION_INTERVAL_UNIT = self.EXTRACTION_INTERVAL_UNIT
+            extractor.EXTRACTION_INTERVAL_LENGTH = self.EXTRACTION_INTERVAL_LENGTH
             extractor.data_directory = self.data_directory
             
             self.logger.info(f"Extracting data from {start_time} to {end_time}")
@@ -204,10 +204,10 @@ def create_scheduler_config(schedule_freq='1h', lookback_dur='1h', output_file='
     env_content = f"""ETHEREUM_PROVIDER_URL={config['provider_url']}
 START_DATE={config['start_date'].strftime('%Y-%m-%d-%H:%M')}
 END_DATE={config['end_date'].strftime('%Y-%m-%d-%H:%M')}
-OBSERVATIONS_PER_INTERVAL={config['observations']}
+EXTRACTION_OBSERVATIONS_PER_INTERVAL={config['observations']}
 DELAY_SECONDS={config['delay']}
-INTERVAL_SPAN_TYPE={config['interval_type']}
-INTERVAL_SPAN_LENGTH={config['interval_length']}
+EXTRACTION_INTERVAL_UNIT={config['interval_type']}
+EXTRACTION_INTERVAL_LENGTH={config['interval_length']}
 DATA_DIRECTORY={config['data_directory']}
 SCHEDULE_FREQUENCY={schedule_freq}
 LOOKBACK_DURATION={lookback_dur}

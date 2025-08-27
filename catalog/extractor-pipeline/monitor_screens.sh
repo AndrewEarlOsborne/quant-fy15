@@ -29,7 +29,7 @@ check_vm_screens() {
     
     log_step "CHECK" "Checking screen sessions on $vm_name"
     
-    # Execute screen monitoring command on VM
+    # Execute comprehensive screen monitoring command on VM
     SCREEN_INFO=$(gcloud compute ssh "$vm_name" \
         --project="$GCP_PROJECT_ID" \
         --zone="$GCP_ZONE" \
@@ -40,14 +40,17 @@ check_vm_screens() {
         echo '=== Extraction Process ==='
         sudo -u ethereum ps aux | grep -E '(extraction|extractor\.py)' | grep -v grep || echo 'No extraction processes'
         echo ''
-        echo '=== Log Files ==='
-        find /home/ethereum/logs -name '*.log' -exec echo '{}:' \; -exec tail -3 '{}' \; 2>/dev/null || echo 'No log files'
+        echo '=== Status Information ==='
+        echo 'Extraction Status:' \$(cat /home/ethereum/extraction/status.txt 2>/dev/null || echo 'No status file')
+        echo 'Startup Complete:' \$(test -f /tmp/startup-complete && echo 'YES' || echo 'NO')
+        echo 'CSV Files:' \$(find /home/ethereum/extraction/data -name '*.csv' 2>/dev/null | wc -l || echo 0)
         echo ''
-        echo '=== Data Files ==='
-        find /home/ethereum/extraction/data -name '*.csv' 2>/dev/null | wc -l | xargs echo 'CSV files:'
+        echo '=== Recent Log Entries ==='
+        echo 'Extraction Log:'
+        tail -3 /home/ethereum/logs/extraction.log 2>/dev/null || echo 'No extraction log'
         echo ''
-        echo '=== Status File ==='
-        cat /home/ethereum/extraction/status.txt 2>/dev/null || echo 'No status file'
+        echo 'Startup Log:'
+        tail -3 /var/log/startup-script.log 2>/dev/null || echo 'No startup log'
         " \
         --quiet 2>/dev/null)
     
@@ -164,8 +167,10 @@ except Exception:
                 --zone="$GCP_ZONE" \
                 --command="
                 cd /home/ethereum/extraction
-                sudo -u ethereum screen -dmS extraction bash -c '/home/ethereum/extraction/start_extraction.sh'
+                sudo -u ethereum bash -c 'cd /home/ethereum/extraction && screen -dmS extraction ./start_extraction.sh'
                 echo 'Screen session restarted on $vm_name'
+                sleep 2
+                echo 'Screen verification:' \$(sudo -u ethereum screen -list 2>/dev/null | grep extraction || echo 'FAILED')
                 " \
                 --quiet 2>/dev/null
                 
