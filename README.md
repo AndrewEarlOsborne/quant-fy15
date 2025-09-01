@@ -95,7 +95,6 @@ Ethereum-Validator-Trader/
 │   │   ├── data_manager.py           # Data management
 │   │   └── activate_agent.py         # Main trading agent
 │   └── scripts/                      # Deployment scripts
-│       ├── deploy.sh                 # Local deployment
 │       ├── quickstart-local.sh       # Local development setup
 │       └── quikstart-cloud.sh        # Cloud deployment
 ├── model-development/                 # ML model development

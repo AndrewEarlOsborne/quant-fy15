@@ -140,15 +140,6 @@ system-status: ## Check status of all services
 system-clean: trader-clean extractor-clean ## Clean entire system
 	@$(DOCKER) system prune -a -f
 
-# Deployment Commands
-deploy: ## Deploy using Docker locally
-	@chmod +x scripts/deploy.sh
-	@./scripts/deploy.sh
-
-cloud-deploy: ## Deploy to cloud instance
-	@chmod +x scripts/cloud_deploy.sh
-	@./scripts/cloud_deploy.sh
-
 # Utility Commands
 status: system-status ## Alias for system-status
 
