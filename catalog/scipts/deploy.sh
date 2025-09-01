@@ -39,7 +39,7 @@ log_step "CLEANUP" "Existing container cleanup completed"
 
 # Create necessary directories on host
 log_step "DIRS" "Creating required directories..."
-mkdir -p ./data/{raw,processed,backups}
+mkdir -p ./data
 mkdir -p ./models
 mkdir -p ./logs
 log_step "DIRS" "Directories created successfully"
