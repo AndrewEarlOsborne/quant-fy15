@@ -60,6 +60,7 @@ class Orchestrator:
         missing = [k for k, v in required.items() if not v]
         if missing:
             raise ValueError(f"Missing required config: {missing}")
+            
         
         self.project_id = required['GCP_PROJECT_ID']
         self.extraction_repo = required['EXTRACTION_REPO']
@@ -96,10 +97,10 @@ class Orchestrator:
                 with open(self.state_file, 'r') as f:
                     state = json.load(f)
                     self.vm_counter = state.get('vm_counter', 0)
-                    self.logger.info(f"Loaded state with {len(state.get('vms', {}))} tracked VMs")
+                    self.logger.info(f"Loaded state with VMs: {list(state.get('vms', {}).keys())}")
                     return state
             except Exception as e:
-                self.logger.error(f"Failed to load state file: {e}")
+                self.logger.error(f"Failed to load discovered state file: {e}")
         return None
         
     def _save_state_file(self, state: Dict):
@@ -131,39 +132,39 @@ class Orchestrator:
         except Exception:
             return False
             
-    def _clean_host_keys(self, vm_name: str) -> bool:
-        """Clean up conflicting host keys for a VM."""
-        try:
-            # Get VM's external IP
-            cmd = ["gcloud", "compute", "instances", "describe", vm_name,
-                   "--project", self.project_id, "--zone", self.zone,
-                   "--format", "value(networkInterfaces[0].accessConfigs[0].natIP)",
-                   "--quiet"]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    # def _clean_host_keys(self, vm_name: str) -> bool:
+    #     """Clean up conflicting host keys for a VM."""
+    #     try:
+    #         # Get VM's external IP
+    #         cmd = ["gcloud", "compute", "instances", "describe", vm_name,
+    #                "--project", self.project_id, "--zone", self.zone,
+    #                "--format", "value(networkInterfaces[0].accessConfigs[0].natIP)",
+    #                "--quiet"]
+    #         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             
-            if result.returncode != 0 or not result.stdout.strip():
-                self.logger.debug(f"Could not get IP for {vm_name} for host key cleanup")
-                return True  # Continue anyway
+    #         if result.returncode != 0 or not result.stdout.strip():
+    #             self.logger.debug(f"Could not get IP for {vm_name} for host key cleanup")
+    #             return True  # Continue anyway
                 
-            vm_ip = result.stdout.strip()
+    #         vm_ip = result.stdout.strip()
             
-            # Remove entries for both VM name and IP from known_hosts file
-            known_hosts_file = os.path.expanduser("~/.ssh/google_compute_known_hosts")
+    #         # Remove entries for both VM name and IP from known_hosts file
+    #         known_hosts_file = os.path.expanduser("~/.ssh/google_compute_known_hosts")
             
-            for identifier in [vm_name, vm_ip]:
-                cleanup_cmd = ["ssh-keygen", "-f", known_hosts_file, "-R", identifier]
-                cleanup_result = subprocess.run(cleanup_cmd, capture_output=True, text=True, timeout=10)
+    #         for identifier in [vm_name, vm_ip]:
+    #             cleanup_cmd = ["ssh-keygen", "-f", known_hosts_file, "-R", identifier]
+    #             cleanup_result = subprocess.run(cleanup_cmd, capture_output=True, text=True, timeout=10)
                 
-                if cleanup_result.returncode == 0:
-                    self.logger.debug(f"Cleaned host key for {identifier}")
-                else:
-                    self.logger.debug(f"No host key found for {identifier} (or already clean)")
+    #             if cleanup_result.returncode == 0:
+    #                 self.logger.debug(f"Cleaned host key for {identifier}")
+    #             else:
+    #                 self.logger.debug(f"No host key found for {identifier} (or already clean)")
                     
-            return True
+    #         return True
             
-        except Exception as e:
-            self.logger.debug(f"Host key cleanup failed for {vm_name}: {e}")
-            return True  # Continue anyway
+    #     except Exception as e:
+    #         self.logger.debug(f"Host key cleanup failed for {vm_name}: {e}")
+    #         return True  # Continue anyway
             
     def _get_vm_time_range(self, vm_index: int) -> tuple:
         """Calculate time range for specific VM."""
@@ -180,103 +181,45 @@ class Orchestrator:
             
         return (vm_start.strftime('%Y-%m-%d-%H:%M'), vm_end.strftime('%Y-%m-%d-%H:%M'))
         
-#     def _create_startup_script(self, vm_index: int) -> str:
-#         """Generate startup script for VM."""
-#         vm_start, vm_end = self._get_vm_time_range(vm_index)
-#         provider_url = self.provider_urls[vm_index % len(self.provider_urls)]
-        
-#         return f'''#!/bin/bash
-# set -e
-
-# # Setup logging
-# LOGFILE="/var/log/startup-script.log"
-# STATUSFILE="/tmp/startup-status.log"
-
-# log_step() {{
-#     echo "$(date '+%Y-%m-%d %H:%M:%S') [$1] $2" | tee -a "$LOGFILE" "$STATUSFILE"
-# }}
-
-# # Initialize log files  
-# touch "$LOGFILE" "$STATUSFILE"
-# log_step "INIT" "=== VM Startup Script Starting ==="
-
-# # System update
-# log_step "UPDATE" "Starting system update"
-# apt-get update -qq || {{ log_step "ERROR" "System update failed"; exit 1; }}
-
-# # Install packages
-# log_step "INSTALL" "Installing required packages"
-# apt-get install -y git python3-pip python3-venv screen curl || {{
-#     log_step "ERROR" "Package installation failed"; exit 1;
-# }}
-
-# # Setup extraction environment
-# log_step "SETUP" "Setting up extraction environment"
-# mkdir -p /opt/extraction/logs
-# cd /opt/extraction
-
-# # Clone repository
-# log_step "CLONE" "Cloning extraction repository"
-# rm -rf /opt/extraction/* /opt/extraction/.* 2>/dev/null || true
-# git clone https://{self.extraction_repo_auth}@github.com/{self.extraction_repo}.git . || {{
-#     log_step "ERROR" "Repository clone failed"; exit 1;
-# }}
-
-# # Create virtual environment
-# log_step "VENV" "Setting up Python environment"
-# python3 -m venv venv || {{
-#     log_step "ERROR" "Virtual environment creation failed"; exit 1;
-# }}
-
-# # Install dependencies
-# log_step "DEPS" "Installing dependencies"
-# source venv/bin/activate
-# pip install -r requirements.txt || {{
-#     log_step "ERROR" "Dependency installation failed"; exit 1;
-# }}
-
-# # Create configuration file
-# log_step "CONFIG" "Creating VM-specific configuration"
-# cat > .env << 'EOF'
-# ETHEREUM_PROVIDER_URL={provider_url}
-# START_DATE={vm_start}
-# END_DATE={vm_end}
-# EXTRACTION_OBSERVATIONS_PER_INTERVAL={self.vm_config['observations']}
-# EXTRACTION_PROVIDER_FETCH_DELAY_SECONDS={self.vm_config['delay']}
-# EXTRACTION_INTERVAL_UNIT={self.vm_config['interval_type']}
-# EXTRACTION_INTERVAL_LENGTH={self.vm_config['interval_length']}
-# DATA_DIRECTORY=data
-# LOG_LEVEL=INFO
-# EOF
-
-# # Create extraction startup script
-# cat > start_extraction.sh << 'EOF'
-# #!/bin/bash
-# cd /opt/extraction
-# mkdir -p logs
-
-# echo "STARTING" > status.txt
-# echo "$(date '+%Y-%m-%d %H:%M:%S') Starting extraction" >> logs/extraction.log
-
-# source venv/bin/activate
-
-# sudo chmod +x start_extraction.sh
-
-# sleep 30
-# EOF
-
-# # Setup complete - extraction will be started separately via screen
-# log_step "SETUP_COMPLETE" ""
-
-# # Mark startup complete
-# echo "STARTUP_COMPLETE" > /tmp/startup-complete
-# log_step "COMPLETE" "Startup script completed"
-#         '''
-        
     def _initialize_vm(self, vm_name: str, vm_index: int) -> bool:
         """Initialize VM - create and wait for running state."""
         try:
-            # Create VM
+            self.logger.info(f"Initializing VM: {vm_name}")
+            vm_env = self._make_vm_env(vm_index)
+            # Create VM with properly escaped startup script
+            startup_script = f"""export DEBIAN_FRONTEND=noninteractive && sudo apt-get update -qq && sudo apt-get install -y git -qq > /dev/null 2>&1
+sleep 30
+
+echo "Attempting git clone..."
+sudo git clone https://{self.extraction_repo_auth}@github.com/{self.extraction_repo}.git extractor 2>&1
+sleep 2
+
+cd extractor
+sudo chmod +x start.sh
+
+# Create .env file with proper permissions
+if sudo tee .env > /dev/null << 'EOF'
+{vm_env}
+EOF
+then
+    echo 'env file created successfully'
+    if [ -f .env ]; then
+        file_size=$(sudo wc -c < .env)
+        line_count=$(sudo wc -l < .env)
+        echo "env file exists: $file_size bytes, $line_count lines"
+        sudo chmod 644 .env
+    else
+        echo 'ERROR: env file was not created'
+        exit 1
+    fi
+else
+    echo 'ERROR: failed to write env file'
+    exit 1
+fi
+
+echo "Setup complete"
+"""
+
             cmd = [
                 "gcloud", "compute", "instances", "create", vm_name,
                 "--project", self.project_id,
@@ -287,26 +230,53 @@ class Orchestrator:
                 "--boot-disk-size", self.disk_size,
                 "--tags", "ethereum-extractor",
                 "--scopes", "https://www.googleapis.com/auth/cloud-platform",
+                # "--metadata", f"startup-script={startup_script}",
                 "--quiet"
             ]
             
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if result.returncode != 0:
                 self.logger.error(f"Failed to create VM {vm_name}")
-                self.logger.error(f"VM creation stdout: {result.stdout}")
-                self.logger.error(f"VM creation stderr: {result.stderr}")
+                self.logger.error(f"########VM creation stdout: ########\n {result.stdout}")
+                self.logger.error(f"########VM creation stderr: ########\n {result.stderr}")
                 return False
+            else:
+                self.logger.info(f"VM {vm_name} created successfully")
+                self.logger.debug(f"######## VM creation stdout: ########\n{result.stdout}")
                 
-            self.logger.info(f"VM {vm_name} created, waiting for running state...")
-            return self._wait_for_running_state(vm_name)
+            
+            running =  self._wait_for_running_state(vm_name)
+
+            if not running:
+                self.logger.error(f"VM {vm_name} failed to reach running state")
+                return False
+            
+            self.logger.info(f"VM {vm_name}: Running state confirmed")
+            cmd = ["gcloud", "compute", "ssh", vm_name,
+                   "--project", self.project_id, "--zone", self.zone,
+                   "--command", startup_script,
+                   "--quiet"]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if result.returncode != 0:
+                self.logger.error(f"VM {vm_name}: Failed to start. Dump: ")
+                self.logger.error(f"{result.stdout}")
+                self.logger.error(f"{result.stderr}")
+                return False
+            else:
+                self.logger.info(f"VM {vm_name}: Started script executed")
+                self.logger.debug(f"Startup script stdout: {result.stdout}")
+                return True
             
         except Exception as e:
-            self.logger.error(f"VM initialization failed for {vm_name}: {e}")
+            self.logger.error(f"VM startup failed for {vm_name}: {e}")
             return False
             
     def _wait_for_running_state(self, vm_name: str) -> bool:
         """Wait for VM to reach running state and SSH readiness."""
+        self.logger.info(f"VM {vm_name} created, waiting for running state...")
         max_attempts = 20
+        
         for attempt in range(max_attempts):
             try:
                 # Check VM status
@@ -316,11 +286,12 @@ class Orchestrator:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
                 
                 if result.returncode != 0:
-                    self.logger.debug(f"VM status check failed for {vm_name}: stdout='{result.stdout}', stderr='{result.stderr}'")
+                    self.logger.error(f"VM {vm_name}: startup failed")
+                    self.logger.error(f"Describe stdout: {result.stdout}")
+                    self.logger.error(f"Describe stderr: {result.stderr}")
                     return False
                     
                 vm_status = result.stdout.strip()
-                self.logger.debug(f"VM {vm_name} status: {vm_status} (attempt {attempt+1})")
                 
                 if vm_status == "RUNNING":
                     # Test SSH connectivity
@@ -329,9 +300,10 @@ class Orchestrator:
                               "--command", "echo 'SSH ready'",
                               "--quiet"]
                     
-                    ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=30)
+                    ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=60)
                     if ssh_result.returncode == 0:
-                        self.logger.info(f"VM {vm_name} is running and SSH ready")
+                        self.logger.info(f"VM {vm_name}: Running and SSH ready")
+                        self.logger.debug(f"Running SSH stdout: {ssh_result.stdout}")
                         return True
                     else:
                         self.logger.debug(f"SSH not ready for {vm_name}: stdout='{ssh_result.stdout}', stderr='{ssh_result.stderr}'")
@@ -351,67 +323,67 @@ class Orchestrator:
         self.logger.error(f"VM {vm_name} failed to become ready within timeout")
         return False
 
-    def _execute_startup_script(self, vm_name: str, vm_index: int) -> bool:
-        """Execute startup script on VM."""
-        local_env = None
-        try:
-            # Upload custom .env file
-            local_env = self._make_vm_env(vm_index)
+    # def _execute_startup_script(self, vm_name: str, vm_index: int) -> bool:
+    #     """Execute startup script on VM."""
+    #     local_env = None
+    #     try:
+    #         # Upload custom .env file
+    #         local_env = self._make_vm_env(vm_index)
             
-            scp_cmd = [
-                "gcloud", "compute", "scp", local_env,
-                f"{vm_name}:/tmp/.env",
-                "--project", self.project_id, "--zone", self.zone,
-                "--quiet"
-            ]
+    #         scp_cmd = [
+    #             "gcloud", "compute", "scp", local_env,
+    #             f"{vm_name}:.env",
+    #             "--project", self.project_id, "--zone", self.zone,
+    #             "--quiet"
+    #         ]
             
-            scp_result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=120)
-            success = scp_result.returncode == 0
+    #         scp_result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=120)
+    #         success = scp_result.returncode == 0
             
-            if not success:
-                self.logger.error(f"Failed to upload script to {vm_name}")
-                self.logger.error(f"SCP stdout: {scp_result.stdout}")
-                self.logger.error(f"SCP stderr: {scp_result.stderr}")
-                return False
+    #         if not success:
+    #             self.logger.error(f"Failed to upload script to {vm_name}")
+    #             self.logger.error(f"SCP stdout: {scp_result.stdout}")
+    #             self.logger.error(f"SCP stderr: {scp_result.stderr}")
+    #             return False
             
-            git_install_command = f"sudo apt-get install -y git && sleep 5 && git clone https://{self.extraction_repo_auth}@github.com/{self.extraction_repo}.git ."
+    #         git_install_command = f"apt-get install -y git && sleep 5 && git clone https://{self.extraction_repo_auth}@github.com/{self.extraction_repo}.git extractor"
             
-            ssh_start_command = [
-                "gcloud", "compute", "ssh", vm_name,
-                "--project", self.project_id, "--zone", self.zone,
-                "--command", git_install_command
-            ]
+    #         ssh_start_command = [
+    #             "gcloud", "compute", "ssh", vm_name,
+    #             "--project", self.project_id, "--zone", self.zone,
+    #             "--command", git_install_command
+    #         ]
 
-            ssh_result = subprocess.run(ssh_start_command, capture_output=True, text=True, timeout=600)
-            success = ssh_result.returncode == 0
+    #         ssh_result = subprocess.run(ssh_start_command, capture_output=True, text=True, timeout=600)
+    #         success = ssh_result.returncode == 0
 
-            if success:
-                self.logger.info(f"Startup script executed successfully on {vm_name}:")
-                self.logger.info(f"SSH stdout: {ssh_result.stdout}")
-            else:
-                self.logger.error(f"Startup script execution failed on {vm_name}")
-                self.logger.error(f"SSH stdout: {ssh_result.stdout}")
-                self.logger.error(f"SSH stderr: {ssh_result.stderr}")
+    #         if success:
+    #             self.logger.info(f"Startup script executed successfully on {vm_name}:")
+    #             self.logger.info(f"SSH stdout: {ssh_result.stdout}")
+    #         else:
+    #             self.logger.error(f"Startup script execution failed on {vm_name}")
+    #             self.logger.error(f"SSH stdout: {ssh_result.stdout}")
+    #             self.logger.error(f"SSH stderr: {ssh_result.stderr}")
             
-            return success
+    #         return success
             
-        except Exception as e:
-            self.logger.error(f"Startup script execution failed for {vm_name}: {e}")
-            return False
-        finally:
-            # Clean up temporary file
-            if local_env and os.path.exists(local_env):
-                os.remove(local_env)
+    #     except Exception as e:
+    #         self.logger.error(f"Startup script execution failed for {vm_name}: {e}")
+    #         return False
+    #     finally:
+    #         # Clean up temporary file
+    #         if local_env and os.path.exists(local_env):
+    #             os.remove(local_env)
         
     def _make_vm_env(self, vm_index: int) -> str:
-        """Create a on-vm .env file and return the file path."""
+        """Create a on-vm .env file and return the file as a string."""
         start_date, end_date = self._get_vm_time_range(vm_index)
 
         observations_per_interval = self.vm_config['observations']
         interval_span_type = self.vm_config['interval_type']
         interval_span_length = self.vm_config['interval_length'] 
         
-        env_content = f"""# ===================================
+        return f"""# ===================================
 # Ethereum Extraction Pipeline Config
 # ===================================
 ETHEREUM_PROVIDER_URL=https://eth.drpc.org
@@ -428,12 +400,6 @@ INTERVAL_SPAN_LENGTH={interval_span_length}
 
 DATA_DIRECTORY=data
 """
-        
-        # Write to temporary file
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.env', delete=False) as f:
-            f.write(env_content)
-            return f.name
             
     def _start_extraction_screen(self, vm_name: str) -> bool:
         """Start the extraction process in a screen session."""
@@ -443,11 +409,11 @@ DATA_DIRECTORY=data
             ssh_cmd = [
                 "gcloud", "compute", "ssh", vm_name,
                 "--project", self.project_id, "--zone", self.zone,
-                "--command", "sudo -s bash start.sh",
+                "--command", "cd extractor && sudo bash start.sh",
                 "--quiet"
             ]
             
-            ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=60)
+            ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=180)
             success = ssh_result.returncode == 0
             
             if success:
@@ -465,7 +431,7 @@ DATA_DIRECTORY=data
             return False
             
     def _get_vm_status(self, vm_name: str) -> str:
-        """Get VM status: initialized, running, completed, failed."""
+        """Get VM status: starting, running (with progress fraction), completed, failed."""
         try:
             # Check VM exists and is running
             cmd = ["gcloud", "compute", "instances", "describe", vm_name,
@@ -479,14 +445,13 @@ DATA_DIRECTORY=data
             vm_status = result.stdout.strip()
             
             if vm_status in ["PROVISIONING", "STAGING"]:
-                return "initialized"
+                return "starting"
             elif vm_status != "RUNNING":
                 return "failed"
                 
-            # Check extraction status
             ssh_cmd = ["gcloud", "compute", "ssh", vm_name,
                       "--project", self.project_id, "--zone", self.zone,
-                      "--command", "cat /opt/extraction/status.txt 2>/dev/null || echo 'NO_STATUS'",
+                      "--command", "cat extractor/status.txt 2>/dev/null || echo 'NO_STATUS'",
                       "--quiet"]
             
             ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=15)
@@ -501,7 +466,11 @@ DATA_DIRECTORY=data
                 elif status_text in ["STARTING", "NO_STATUS"]:
                     return "running"
                 else:
-                    return "running"
+                    # Check if status contains progress information (e.g., "17/89")
+                    if "/" in status_text and status_text.replace("/", "").replace(" ", "").isdigit():
+                        return f"running {status_text}"
+                    else:
+                        return "running"
             else:
                 self.logger.debug(f"SSH status check failed for {vm_name}: stdout='{ssh_result.stdout}', stderr='{ssh_result.stderr}'")
                 return "running"
@@ -678,10 +647,10 @@ DATA_DIRECTORY=data
             if not self._initialize_vm(vm_name, vm_index):
                 return False
                 
-            # Step 2: Execute startup script (synchronous setup)
-            if not self._execute_startup_script(vm_name, vm_index):
-                self.logger.error(f"Failed to run startup {vm_name}")
-                return False
+            # # Step 2: Execute startup script (synchronous setup)
+            # if not self._execute_startup_script(vm_name, vm_index):
+            #     self.logger.error(f"Failed to run startup {vm_name}")
+            #     return False
                 
             # Step 3: Run start script in screen session
             if not self._start_extraction_screen(vm_name):
@@ -697,75 +666,22 @@ DATA_DIRECTORY=data
             return False
 
     def check_status(self) -> Dict:
-        """Get deployment status and automatically process completed VMs."""
+        """Get status of each VM as a simple dict."""
         try:
             state = self._load_state_file()
             if not state or not state.get('vms'):
-                return {"status": "no_deployment"}
+                return {}
                 
-            # Check status of all VMs
+            # Get status of all VMs
             vm_statuses = {}
-            completed_vms = []
-            processed_count = 0
-            
-            for vm_name, vm_data in state['vms'].items():
-                current_status = self._get_vm_status(vm_name)
-                vm_statuses[vm_name] = current_status
+            for vm_name in state['vms'].keys():
+                vm_statuses[vm_name] = self._get_vm_status(vm_name)
                 
-                # Process completed VMs that haven't been processed yet
-                if current_status == "completed" and vm_data.get('status') != 'processed':
-                    if self._process_completed_vm(vm_name):
-                        state['vms'][vm_name]['status'] = 'processed'
-                        state['vms'][vm_name]['processed_at'] = datetime.now().isoformat()
-                        processed_count += 1
-                        completed_vms.append(vm_name)
-                        
-            # Save updated state
-            if processed_count > 0:
-                self._save_state_file(state)
-                
-            # Count statuses
-            status_counts = {}
-            for status in vm_statuses.values():
-                status_counts[status] = status_counts.get(status, 0) + 1
-                
-            # Check terminal states
-            all_processed = all(vm_data.get('status') == 'processed' 
-                              for vm_data in state['vms'].values())
-            
-            # Check if all VMs are in terminal states (completed, failed, or processed)
-            terminal_states = {'completed', 'failed', 'processed'}
-            all_terminal = all(current_status in terminal_states 
-                             for current_status in vm_statuses.values())
-            
-            # Determine overall status
-            if all_processed:
-                overall_status = "completed"
-            elif all_terminal:
-                overall_status = "all_terminal"
-            else:
-                overall_status = "active"
-            
-            result = {
-                "status": overall_status,
-                "deployment_time": state.get('deployment_time'),
-                "total_vms": len(state['vms']),
-                "vm_statuses": vm_statuses,
-                "status_counts": status_counts,
-                "processed_this_check": processed_count,
-                "completed_vms": completed_vms,
-                "all_terminal": all_terminal
-            }
-            
-            # If all VMs are processed, signal completion
-            if all_processed:
-                self.logger.info("Deployment finished")
-                
-            return result
+            return vm_statuses
             
         except Exception as e:
             self.logger.error(f"Status check failed: {e}")
-            return {"status": "status_check_failed", "error": str(e)}
+            return {}
 
     def cleanup(self) -> Dict:
         """Clean all VMs and delete state file only after confirming all deletions."""
