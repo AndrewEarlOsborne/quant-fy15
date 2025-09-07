@@ -302,7 +302,6 @@ echo "Setup complete"
                     
                     ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=60)
                     if ssh_result.returncode == 0:
-                        self.logger.info(f"VM {vm_name}: Running and SSH ready")
                         self.logger.debug(f"Running SSH stdout: {ssh_result.stdout}")
                         return True
                     else:
@@ -413,7 +412,7 @@ DATA_DIRECTORY=data
                 "--quiet"
             ]
             
-            ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=180)
+            ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=300)
             success = ssh_result.returncode == 0
             
             if success:
@@ -440,6 +439,9 @@ DATA_DIRECTORY=data
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             
             if result.returncode != 0:
+                self.logger.error(f"VM {vm_name} status: Unable to describe")
+                self.logger.error(f"Describe stdout: {result.stdout}")
+                self.logger.error(f"Describe stderr: {result.stderr}")
                 return "failed"
                 
             vm_status = result.stdout.strip()
@@ -447,6 +449,7 @@ DATA_DIRECTORY=data
             if vm_status in ["PROVISIONING", "STAGING"]:
                 return "starting"
             elif vm_status != "RUNNING":
+                self.logger.error(f"VM {vm_name} in unexpected state: {vm_status}")
                 return "failed"
                 
             ssh_cmd = ["gcloud", "compute", "ssh", vm_name,
@@ -458,15 +461,21 @@ DATA_DIRECTORY=data
             
             if ssh_result.returncode == 0:
                 status_text = ssh_result.stdout.strip()
+
+                self.logger.debug(f"VM {vm_name} status: {status_text}")
                 
                 if status_text == "COMPLETED":
+                    # Cleanup the VM
+                    self.logger.info(f"VM {vm_name} completed - collecting and stopping")
+                    self._get_results(vm_name)
+                    self._delete_vm(vm_name)
                     return "completed"
-                elif status_text == "ERROR":
+                elif status_text in ["ERROR", "NO_STATUS"]:
                     return "failed"
-                elif status_text in ["STARTING", "NO_STATUS"]:
+                elif status_text == ["STARTING"]:
                     return "running"
                 else:
-                    # Check if status contains progress information (e.g., "17/89")
+                    # Check if status contains progress information
                     if "/" in status_text and status_text.replace("/", "").replace(" ", "").isdigit():
                         return f"running {status_text}"
                     else:
@@ -479,61 +488,11 @@ DATA_DIRECTORY=data
             self.logger.error(f"Failed to get status for {vm_name}: {e}")
             return "failed"
             
-    def _process_completed_vm(self, vm_name: str) -> bool:
-        """Process completed VM - download data and stop VM."""
-        try:
-            self.logger.info(f"Processing completed VM: {vm_name}")
-            
-            # Download data
-            vm_dir = os.path.join(self.data_dir, vm_name)
-            os.makedirs(vm_dir, exist_ok=True)
-            
-            # Verify data exists
-            verify_cmd = [
-                "gcloud", "compute", "ssh", vm_name,
-                "--project", self.project_id, "--zone", self.zone,
-                "--command", "find /opt/extraction/data -name '*.csv' | wc -l",
-                "--quiet"
-            ]
-            
-            verify_result = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=60)
-            if verify_result.returncode != 0:
-                self.logger.error(f"Failed to verify data on {vm_name}")
-                self.logger.error(f"Verify stdout: {verify_result.stdout}")
-                self.logger.error(f"Verify stderr: {verify_result.stderr}")
-                return False
-                
-            file_count = int(verify_result.stdout.strip() or "0")
-            if file_count == 0:
-                self.logger.warning(f"No data files found on {vm_name}")
-                return False
-                
-            # Download data
-            scp_cmd = ["gcloud", "compute", "scp", "--recurse", "--compress",
-                      "--project", self.project_id, "--zone", self.zone,
-                      f"{vm_name}:/opt/extraction/data/",
-                      vm_dir, "--quiet"]
-            
-            scp_result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=1800)
-            
-            if scp_result.returncode == 0:
-                # Stop VM
-                self._stop_vm(vm_name)
-                self.logger.info(f"Successfully processed and stopped VM {vm_name}")
-                return True
-            else:
-                self.logger.error(f"Failed to download data from {vm_name}")
-                self.logger.error(f"Download stdout: {scp_result.stdout}")
-                self.logger.error(f"Download stderr: {scp_result.stderr}")
-                return False
-                
-        except Exception as e:
-            self.logger.error(f"Failed to process VM {vm_name}: {e}")
-            return False
-            
-    def _stop_vm(self, vm_name: str) -> bool:
+    def _delete_vm(self, vm_name: str) -> bool:
         """Stop a VM instance."""
         try:
+            self.logger.info(f"Stopping VM: {vm_name}")
+
             cmd = ["gcloud", "compute", "instances", "delete", vm_name,
                    "--project", self.project_id, "--zone", self.zone,
                    "--quiet"]
@@ -544,6 +503,13 @@ DATA_DIRECTORY=data
                 self.logger.info(f"VM {vm_name} stopped")
                 if result.stdout.strip():
                     self.logger.debug(f"Stop VM stdout: {result.stdout}")
+
+                # Remove VM from state file
+                state = self._load_state_file()
+                if state and 'vms' in state:
+                    state['vms'].pop(vm_name, None)
+                    self._save_state_file(state)
+
             else:
                 self.logger.error(f"Failed to stop VM {vm_name}")
                 self.logger.error(f"Stop VM stdout: {result.stdout}")
@@ -670,18 +636,26 @@ DATA_DIRECTORY=data
         try:
             state = self._load_state_file()
             if not state or not state.get('vms'):
-                return {}
+                self.logger.info("Check status: No active deployment found")
+                return {"completed": True, "no_deployment": True}
                 
             # Get status of all VMs
-            vm_statuses = {}
+            vm_statuses = {"completed": True}
             for vm_name in state['vms'].keys():
-                vm_statuses[vm_name] = self._get_vm_status(vm_name)
+                status = self._get_vm_status(vm_name)
+
+                vm_statuses[vm_name] = status
+
+                self.logger.debug(f"    VM {vm_name} Status: {status}")
+                
+                if not status == "completed":
+                    vm_statuses["completed"] = False
                 
             return vm_statuses
             
         except Exception as e:
-            self.logger.error(f"Status check failed: {e}")
-            return {}
+            self.logger.error(f"Status check exception: {e}")
+            return {"completed": False}
 
     def cleanup(self) -> Dict:
         """Clean all VMs and delete state file only after confirming all deletions."""
@@ -692,58 +666,101 @@ DATA_DIRECTORY=data
                 
             self.logger.info(f"Starting cleanup of {len(state['vms'])} VMs")
             
-            # Attempt to delete all VMs
+            # Delete all VMs - _delete_vm handles state file updates
             deletion_results = {}
-            successful_deletions = 0
-            failed_deletions = 0
-            
-            for vm_name in state['vms'].keys():
+            for vm_name in list(state['vms'].keys()):
                 try:
-                    if self._stop_vm(vm_name):
+                    if self._delete_vm(vm_name):
                         deletion_results[vm_name] = "DELETED"
-                        successful_deletions += 1
                     else:
-                        deletion_results[vm_name] = "DELETE_FAILED"
-                        failed_deletions += 1
+                        deletion_results[vm_name] = "DELETE_ERROR"
                 except Exception as e:
                     self.logger.error(f"Error deleting VM {vm_name}: {e}")
                     deletion_results[vm_name] = "DELETE_ERROR"
-                    failed_deletions += 1
-                    
-            # Only delete state file if ALL VMs were successfully deleted
-            if failed_deletions == 0:
-                if os.path.exists(self.state_file):
-                    os.remove(self.state_file)
-                    self.logger.info("All VMs deleted - state file removed")
-                    state_file_removed = True
-                else:
-                    state_file_removed = False
+            
+            # Check if any VMs remain in state
+            updated_state = self._load_state_file()
+            remaining_vms = updated_state.get('vms', {}) if updated_state else {}
+            
+            # Remove state file only if no VMs remain
+            if not remaining_vms and os.path.exists(self.state_file):
+                os.remove(self.state_file)
+                self.logger.info("All VMs deleted - state file removed")
+                state_file_removed = True
             else:
-                # Update state to only track failed deletions
-                failed_vms = {vm_name: vm_data for vm_name, vm_data in state['vms'].items()
-                             if deletion_results.get(vm_name) != "DELETED"}
-                if failed_vms:
-                    state['vms'] = failed_vms
-                    self._save_state_file(state)
-                    self.logger.warning(f"State file updated - {len(failed_vms)} VMs still tracked")
                 state_file_removed = False
-                
-            result = {
+            
+            failed_deletions = sum(1 for result in deletion_results.values() if result != "DELETED")
+            
+            return {
                 "status": "cleanup_complete" if failed_deletions == 0 else "cleanup_partial",
-                "successful_deletions": successful_deletions,
                 "failed_deletions": failed_deletions,
                 "total_vms": len(deletion_results),
                 "deletion_results": deletion_results,
                 "state_file_removed": state_file_removed
             }
             
-            if failed_deletions == 0:
-                self.logger.info(f"Cleanup completed successfully - all {successful_deletions} VMs deleted")
-            else:
-                self.logger.warning(f"Partial cleanup - {failed_deletions} VMs failed to delete")
-                
-            return result
-            
         except Exception as e:
             self.logger.error(f"Cleanup failed: {e}")
             return {"status": "cleanup_failed", "error": str(e)}
+        
+
+    def _get_results(self, vm_name: str) -> None:
+        """Download CSV files from VM's extractor/data directory to local collected_data directory."""
+        try:
+            self.logger.info(f"Downloading results from VM: {vm_name}")
+            
+            # Ensure local collected_data directory exists
+            os.makedirs('collected_data', exist_ok=True)
+            
+            # First, list all CSV files in the VM's extractor/data directory
+            list_cmd = [
+                "gcloud", "compute", "ssh", vm_name,
+                "--project", self.project_id, "--zone", self.zone,
+                "--command", "find extractor/data -name '*.csv' -type f",
+                "--quiet"
+            ]
+            
+            list_result = subprocess.run(list_cmd, capture_output=True, text=True, timeout=60)
+            if list_result.returncode != 0:
+                self.logger.error(f"Failed to list files on {vm_name}")
+                self.logger.error(f"List stdout: {list_result.stdout}")
+                self.logger.error(f"List stderr: {list_result.stderr}")
+                return
+            
+            files_to_download = [f.strip() for f in list_result.stdout.strip().split('\n') if f.strip()]
+            
+            if not files_to_download:
+                self.logger.warning(f"No CSV files found on {vm_name}")
+                return
+            
+            self.logger.info(f"Found {len(files_to_download)} files to download from {vm_name}")
+            
+            # Download each file individually to preserve filenames
+            for remote_file_path in files_to_download:
+                # Extract just the filename from the full path
+                filename = os.path.basename(remote_file_path)
+                local_file_path = os.path.join('collected_data', filename)
+                
+                # Use SCP to download the file
+                scp_cmd = [
+                    "gcloud", "compute", "scp",
+                    "--project", self.project_id, "--zone", self.zone,
+                    f"{vm_name}:{remote_file_path}",
+                    local_file_path,
+                    "--quiet"
+                ]
+                
+                scp_result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=300)
+                
+                if scp_result.returncode == 0:
+                    self.logger.info(f"Downloaded {filename} from {vm_name}")
+                else:
+                    self.logger.error(f"Failed to download {filename} from {vm_name}")
+                    self.logger.error(f"SCP stdout: {scp_result.stdout}")
+                    self.logger.error(f"SCP stderr: {scp_result.stderr}")
+            
+            self.logger.info(f"Completed downloading results from {vm_name}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get results from {vm_name}: {e}")

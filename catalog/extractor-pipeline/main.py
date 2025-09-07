@@ -20,7 +20,7 @@ def main():
     
     # Setup comprehensive logging
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format='%(asctime)s - %(levelname)-8s - %(name)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
@@ -57,46 +57,35 @@ def main():
         
         while True:
             try:
-                status_result = orchestrator.check_status()
+                vm_statuses = orchestrator.check_status()
                     
-                # Process status results
-                if status_result.get("status") == "no_deployment":
-                    logger.info("No active deployment found - monitoring complete")
+                if vm_statuses == {}:
+                    logger.error(f"Status check returned empty.")
+                    raise Exception(f"Status check failed.")
+                    
+                elif vm_statuses.get("no_deployment"):
+                    logger.info("No active deployment found - exiting monitoring loop")
                     break
                     
-                elif status_result.get("status") == "status_check_failed":
-                    error_msg = status_result.get('error', 'Unknown error')
-                    logger.error(f"Status check returned failure: {error_msg}")
-                    raise Exception(f"Status check failed: {error_msg}")
-                    
-                elif status_result.get("status") == "completed":
+                elif vm_statuses.get("completed"):
 
                     # Auto-cleanup successful deployment
                     logger.info("All VMs completed successfully")
-                    cleanup_result = orchestrator.cleanup()
-                    if cleanup_result.get("status") == "cleanup_complete":
-                        logger.info("SUCCESS: Automatic cleanup completed")
-                    else:
-                        logger.warning(f"Cleanup incomplete: {cleanup_result.get('status')}")
-                    break
+                    try:
+                        orchestrator.cleanup()
+                        logger.info("Cleanup after completion succeeded")
+                        logger.info("=== DEPLOYMENT COMPLETED SUCCESSFULLY ===")
+                        break  # Exit the monitoring loop
+                    except Exception as cleanup_error:
+                        logger.error(f"Cleanup after completion failed: {cleanup_error}")
+                        raise cleanup_error
                     
                 else:
                     # Show detailed current status
-                    total_vms = status_result.get('total_vms', 0)
-                    status_counts = status_result.get('status_counts', {})
-                    processed_count = status_result.get('processed_this_check', 0)
+                    logger.debug(f"Current VM statuses:\n {vm_statuses.items()}")
                     
                     elapsed_time = time.time() - start_time
-                    logger.info(f"Current VM Status: {status_result.get("status")}" )
-                    logger.info(f"   Total VMs: {total_vms}, Elapsed: {elapsed_time/3600:.1f}h")
-                    for status, count in status_counts.items():
-                        logger.info(f"  {status}: {count} VMs")
-                        
-                    if processed_count > 0:
-                        logger.info(f"PROCESSED: VMs completed this check:")
-                        completed_vms = status_result.get('completed_vms', [])
-                        for vm_name in completed_vms:
-                            logger.info(f"  - {vm_name}: Completed")
+                    logger.info(f"Elapsed: {elapsed_time/3600:.1f}h")
                     
                     # Wait before next check
                     logger.info(f"Next status check in {check_interval} seconds...")
