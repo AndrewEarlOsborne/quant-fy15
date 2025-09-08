@@ -8,11 +8,17 @@ to manage VM lifecycle with only 3 simple functions:
 - build(): Deploy VMs
 - check_status(): Monitor and process VMs  
 - cleanup(): Clean all VMs
+- Aggregate data
+- Complete feature engineering
 """
 
 import time
 import logging
+import pandas as pd
+
 from orchestrator import Orchestrator
+from data_engineering import aggregate_data, engineer_features, get_yfinance_features
+            
 
 
 def main():
@@ -93,7 +99,7 @@ def main():
                     
             except KeyboardInterrupt:
                 logger.warning("Received keyboard interrupt - initiating graceful shutdown")
-                break
+                raise KeyboardInterrupt
                 
             except Exception as e:
                 logger.error(f"Error in monitoring loop: {e}")
@@ -102,7 +108,21 @@ def main():
         logger.info("=== CLEANUP PHASE ===")
         orchestrator.cleanup()
 
-        return True
+        logger.info("=== DATA ENGINEERING PHASE ===")
+
+        try:
+            aggregated_data = aggregate_data("~/data")
+            logger.info("Data aggregation completed successfully.")
+
+            transformed_aggregated_data: pd.Dataframe = engineer_features(aggregated_data)
+            logger.info(f"Data engineering completed successfully.")
+
+            transformed_aggregated_data.concat(get_yfinance_features())
+            logger.info(f"YFinance feature engineering completed successfully.")
+
+        except Exception as e:
+            logger.error(f"Data engineering failed: {e}")
+
         
     except KeyboardInterrupt:
         logger.warning("=== KEYBOARD INTERRUPT RECEIVED ===")

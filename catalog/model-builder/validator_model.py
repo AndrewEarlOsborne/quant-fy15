@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import yfinance as yf
 import tensorflow as tf
-from keras.models import Model, load_model
+from tensorflow.keras.models import Model, load_model
 from keras.layers import Input, Dense, Dropout, BatchNormalization, Conv1D, Add, Activation, GlobalAveragePooling1D, MultiHeadAttention, LayerNormalization
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from keras.optimizers import AdamW
@@ -182,80 +182,6 @@ class EthereumPricePredictionModel:
                                        axis=0, arr=test_preds_list)
         return train_preds, test_preds
     
-    def prepare_data(self, price_data, whale_data=None, validator_data=None, 
-                    do_balancing=False, test_size=0.2):
-        """
-        Prepare data for training.
-        
-        Args:
-            price_data (pd.DataFrame): Price data
-            whale_data (pd.DataFrame, optional): Whale transaction data
-            validator_data (pd.DataFrame, optional): Validator data
-            do_balancing (bool): Whether to balance training data
-            test_size (float): Test set size
-            
-        Returns:
-            tuple: Prepared training and testing data
-        """
-        # Engineer features
-        labeled_data, self.feature_columns = engineer_features(
-            price_data, whale_data, validator_data
-        )
-        
-        # Generate labels
-        price_changes = labeled_data['close'].pct_change()
-        self.label_thresholds = price_changes.quantile(
-            np.linspace(0, 1, self.num_classes + 1)
-        ).values
-        labeled_data['labels'] = np.digitize(
-            price_changes, bins=self.label_thresholds[1:-1], right=True
-        )
-        
-        # Remove NaN labels and sort
-        labeled_data.dropna(subset=['labels'], inplace=True)
-        labeled_data.sort_values(by='date', inplace=True)
-        
-        # Prepare features and labels
-        y = labeled_data['labels'].astype(int)
-        X = labeled_data[self.feature_columns]
-        
-        # Train/test split
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=self.random_seed, shuffle=False
-        )
-        
-        # Optional balancing
-        if do_balancing:
-            min_count = y_train.value_counts().min()
-            balanced_indices = y_train.groupby(y_train).apply(
-                lambda x: x.sample(min_count, random_state=self.random_seed)
-            ).index.get_level_values(1)
-            X_train = X_train.loc[balanced_indices]
-            y_train = y_train.loc[balanced_indices]
-        
-        # Create windows
-        X_train_windowed = self._create_windows(X_train.values)
-        X_test_windowed = self._create_windows(X_test.values)
-        y_train_windowed = y_train.iloc[self.window_length-1:].values
-        y_test_windowed = y_test.iloc[self.window_length-1:].values
-        
-        # Get price deltas for backtesting
-        price_deltas_train = labeled_data['delta'].loc[
-            y_train.index[self.window_length-1:]
-        ].to_numpy()
-        price_deltas_test = labeled_data['delta'].loc[
-            y_test.index[self.window_length-1:]
-        ].to_numpy()
-        
-        return {
-            'X_train_windowed': X_train_windowed,
-            'X_test_windowed': X_test_windowed,
-            'y_train_windowed': y_train_windowed,
-            'y_test_windowed': y_test_windowed,
-            'price_deltas_train': price_deltas_train,
-            'price_deltas_test': price_deltas_test,
-            'labeled_data': labeled_data
-        }
     
     def train(self, data_dict):
         """

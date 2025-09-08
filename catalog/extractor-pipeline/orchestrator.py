@@ -132,40 +132,6 @@ class Orchestrator:
         except Exception:
             return False
             
-    # def _clean_host_keys(self, vm_name: str) -> bool:
-    #     """Clean up conflicting host keys for a VM."""
-    #     try:
-    #         # Get VM's external IP
-    #         cmd = ["gcloud", "compute", "instances", "describe", vm_name,
-    #                "--project", self.project_id, "--zone", self.zone,
-    #                "--format", "value(networkInterfaces[0].accessConfigs[0].natIP)",
-    #                "--quiet"]
-    #         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            
-    #         if result.returncode != 0 or not result.stdout.strip():
-    #             self.logger.debug(f"Could not get IP for {vm_name} for host key cleanup")
-    #             return True  # Continue anyway
-                
-    #         vm_ip = result.stdout.strip()
-            
-    #         # Remove entries for both VM name and IP from known_hosts file
-    #         known_hosts_file = os.path.expanduser("~/.ssh/google_compute_known_hosts")
-            
-    #         for identifier in [vm_name, vm_ip]:
-    #             cleanup_cmd = ["ssh-keygen", "-f", known_hosts_file, "-R", identifier]
-    #             cleanup_result = subprocess.run(cleanup_cmd, capture_output=True, text=True, timeout=10)
-                
-    #             if cleanup_result.returncode == 0:
-    #                 self.logger.debug(f"Cleaned host key for {identifier}")
-    #             else:
-    #                 self.logger.debug(f"No host key found for {identifier} (or already clean)")
-                    
-    #         return True
-            
-    #     except Exception as e:
-    #         self.logger.debug(f"Host key cleanup failed for {vm_name}: {e}")
-    #         return True  # Continue anyway
-            
     def _get_vm_time_range(self, vm_index: int) -> tuple:
         """Calculate time range for specific VM."""
         start_dt = datetime.strptime(self.start_date, '%Y-%m-%d-%H:%M')

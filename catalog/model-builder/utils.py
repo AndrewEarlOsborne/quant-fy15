@@ -10,6 +10,9 @@ def engineer_features(price_data, whale_data=None, validator_data=None):
     Returns:
         pd.DataFrame: Engineered features dataset
     """
+
+    import pandas as pd
+    
     # Process price data
     price_history = price_data.copy()
     price_history['close'] = pd.to_numeric(price_history['close'], errors='coerce')

@@ -2,7 +2,6 @@ import ccxt
 import logging
 from typing import Dict, Optional
 from .config import config
-from .data_manager import DataManager
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -11,7 +10,7 @@ class TradingEngine:
     """Simple, low value trading agent"""
     
     def __init__(self):
-        self.data_manager = DataManager()
+        
         
         # Initialize exchange
         self.exchange = ccxt.binance({
