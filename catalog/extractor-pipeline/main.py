@@ -15,9 +15,9 @@ to manage VM lifecycle with only 3 simple functions:
 import time
 import logging
 import pandas as pd
+import os
 
 from orchestrator import Orchestrator
-from data_engineering import aggregate_data, engineer_features, get_yfinance_features
             
 
 
@@ -58,7 +58,7 @@ def main():
         logger.info("=== MONITORING PHASE ===")
         logger.info("Starting enhanced VM monitoring loop with automatic cleanup...")
         
-        check_interval = 120
+        check_interval = 20 #TODO raise value for prod
         start_time = time.time()
         
         while True:
@@ -85,14 +85,35 @@ def main():
                     except Exception as cleanup_error:
                         logger.error(f"Cleanup after completion failed: {cleanup_error}")
                         raise cleanup_error
-                    
+
                 else:
+                    # Check if all VMs have failed
+                    all_failed = True
+                    vm_count = 0
+                    for vm_name, status in vm_statuses.items():
+                        if vm_name == "completed":
+                            continue
+                        vm_count += 1
+                        if status not in ["failed", "completed"]:
+                            all_failed = False
+                            break
+
+                    if all_failed and vm_count > 0:
+                        logger.error("All VMs have failed - exiting monitoring loop")
+                        try:
+                            orchestrator.cleanup()
+                            logger.info("Cleanup after failure completed")
+                        except Exception as cleanup_error:
+                            logger.error(f"Cleanup after failure failed: {cleanup_error}")
+                        logger.error("=== DEPLOYMENT FAILED - ALL VMS FAILED ===")
+                        break
+
                     # Show detailed current status
                     logger.debug(f"Current VM statuses:\n {vm_statuses.items()}")
-                    
+
                     elapsed_time = time.time() - start_time
                     logger.info(f"Elapsed: {elapsed_time/3600:.1f}h")
-                    
+
                     # Wait before next check
                     logger.info(f"Next status check in {check_interval} seconds...")
                     time.sleep(check_interval)
@@ -111,19 +132,50 @@ def main():
         logger.info("=== DATA ENGINEERING PHASE ===")
 
         try:
-            aggregated_data = aggregate_data("~/data")
-            logger.info("Data aggregation completed successfully.")
+            data_directory = "data/vm_results"
+            output_file_dir = "data/aggregated"
 
-            transformed_aggregated_data: pd.Dataframe = engineer_features(aggregated_data)
-            logger.info(f"Data engineering completed successfully.")
+            # Create output directory if it doesn't exist
+            os.makedirs(output_file_dir, exist_ok=True)
 
-            transformed_aggregated_data.concat(get_yfinance_features())
-            logger.info(f"YFinance feature engineering completed successfully.")
+            # Aggregate data from various files into a single DataFrame
+            aggregate_results: pd.DataFrame = pd.DataFrame()
+            validator_results: pd.DataFrame = pd.DataFrame()
+            whale_results: pd.DataFrame = pd.DataFrame()
+
+            for file in os.listdir(data_directory):
+                if file.endswith("validator_transactions.csv"):
+                    file_path = os.path.join(data_directory, file)
+                    df = pd.read_csv(file_path)
+                    
+                    validator_results = pd.concat([validator_results, df])
+
+                elif file.endswith("whale_transactions.csv"):
+                    file_path = os.path.join(data_directory, file)
+                    df = pd.read_csv(file_path)
+                    whale_results = pd.concat([whale_results, df])
+
+            
+            # Merge results into one 
+            aggregate_results:pd.DataFrame = pd.merge(whale_results, validator_results, 'inner', ['interval_start', 'interval_end'])
+
+            logger.debug(" ========== Features found ==========")
+            logger.debug(f"{aggregate_results.columns}")
+
+            if not aggregate_results.empty:
+                aggregate_results = aggregate_results.sort_values(["interval_start"])
+
+                output_filename = f"{str(aggregate_results.iloc[0]['interval_start'])}_{str(aggregate_results.iloc[-1]['interval_start'])}_aggregated.csv"
+
+                output_path = os.path.join(output_file_dir, output_filename)
+                aggregate_results.to_csv(output_path, index=False)
+                logger.info("Data aggregation completed successfully.")
+            else:
+                logger.warning("No transaction data files found to aggregate")
 
         except Exception as e:
-            logger.error(f"Data engineering failed: {e}")
+            logger.error(f"Data aggregation failed: {e}")
 
-        
     except KeyboardInterrupt:
         logger.warning("=== KEYBOARD INTERRUPT RECEIVED ===")
         logger.info("Initiating emergency cleanup due to user interruption...")

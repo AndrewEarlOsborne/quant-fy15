@@ -10,7 +10,6 @@
 - `.env` - Configuration file
 - `requirements.txt` - Python dependencies
 - `setup.sh` - Environment setup script
-- `collected_data/` - Directory for aggregated results
 
 ---
 

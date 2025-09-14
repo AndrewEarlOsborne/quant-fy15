@@ -25,9 +25,9 @@ class Orchestrator:
     
     def __init__(self):
         """Initialize orchestrator with configuration."""
-        
+
         os.makedirs('logs', exist_ok=True)
-        
+
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)-8s - %(name)s - %(message)s',
@@ -41,40 +41,26 @@ class Orchestrator:
 
         self._load_config()
         self._initialize_state()
+
+        # Initialize data directory path
+        self.data_dir = "data/vm_results"
         
     def _load_config(self):
         """Load and validate configuration from .env file."""
-        load_dotenv('.env')
+        load_dotenv()
         
-        # Required configurations
-        required = {
-            'GCP_PROJECT_ID': os.getenv('GCP_PROJECT_ID'),
-            'EXTRACTION_REPO': os.getenv('EXTRACTION_REPO'),
-            'EXTRACTION_REPO_AUTH': os.getenv('EXTRACTION_REPO_AUTH'),
-            'START_DATE': os.getenv('START_DATE'),
-            'END_DATE': os.getenv('END_DATE'),
-            'NUM_VMS': os.getenv('NUM_VMS'),
-            'ETHEREUM_PROVIDER_URLS': os.getenv('ETHEREUM_PROVIDER_URLS')
-        }
-        
-        missing = [k for k, v in required.items() if not v]
-        if missing:
-            raise ValueError(f"Missing required config: {missing}")
-            
-        
-        self.project_id = required['GCP_PROJECT_ID']
-        self.extraction_repo = required['EXTRACTION_REPO']
+        self.project_id = os.getenv('GCP_PROJECT_ID')
+        self.extraction_repo = os.getenv('EXTRACTION_REPO')
         self.extraction_repo_auth = os.getenv('EXTRACTION_REPO_AUTH', '')
-        self.start_date = required['START_DATE']
-        self.end_date = required['END_DATE']
-        self.num_vms = int(required['NUM_VMS'])
-        self.provider_urls = [url.strip() for url in required['ETHEREUM_PROVIDER_URLS'].split(',')]
+        self.start_date = os.getenv('START_DATE')
+        self.end_date = os.getenv('END_DATE')
+        self.num_vms = int(os.getenv('NUM_VMS'))
+        self.provider_url = os.getenv('ETHEREUM_PROVIDER_URLS')
+        self.zone = os.getenv('GCP_ZONE', 'us-central1-a')
         
         # Optional configurations
-        self.zone = os.getenv('GCP_ZONE', 'us-central1-a')
         self.machine_type = os.getenv('GCP_MACHINE_TYPE', 'e2-standard-2')
         self.disk_size = os.getenv('GCP_BOOT_DISK_SIZE', '10GB')
-        self.data_dir = os.getenv('LOCAL_DATA_DIR', 'collected_data')
         
         # VM extraction parameters
         self.vm_config = {
@@ -87,7 +73,6 @@ class Orchestrator:
     def _initialize_state(self):
         """Initialize state tracking."""
         self.state_file = "logs/vm_orchestrator_state.json"
-        self.vm_counter = 0
         self._load_state_file()
         
     def _load_state_file(self) -> Optional[Dict]:
@@ -96,7 +81,6 @@ class Orchestrator:
             try:
                 with open(self.state_file, 'r') as f:
                     state = json.load(f)
-                    self.vm_counter = state.get('vm_counter', 0)
                     self.logger.info(f"Loaded state with VMs: {list(state.get('vms', {}).keys())}")
                     return state
             except Exception as e:
@@ -114,9 +98,10 @@ class Orchestrator:
             
     def _get_next_vm_name(self) -> str:
         """Generate next available VM name."""
+        vm_counter:int = 1
         while True:
-            self.vm_counter += 1
-            vm_name = f"extractor-{self.vm_counter:03d}"
+            vm_name = f"extractor-{vm_counter:02d}"
+            vm_counter += 1
             
             # Check if VM name is available
             if not self._vm_exists_in_gcp(vm_name):
@@ -172,7 +157,7 @@ then
     if [ -f .env ]; then
         file_size=$(sudo wc -c < .env)
         line_count=$(sudo wc -l < .env)
-        echo "env file exists: $file_size bytes, $line_count lines"
+        echo "env file exists"
         sudo chmod 644 .env
     else
         echo 'ERROR: env file was not created'
@@ -274,7 +259,7 @@ echo "Setup complete"
                         self.logger.debug(f"SSH not ready for {vm_name}: stdout='{ssh_result.stdout}', stderr='{ssh_result.stderr}'")
                         
                 elif vm_status in ["PROVISIONING", "STAGING"]:
-                    time.sleep(15)
+                    time.sleep(20)
                     continue
                 else:
                     self.logger.error(f"VM {vm_name} failed with status: {vm_status}")
@@ -287,58 +272,6 @@ echo "Setup complete"
             
         self.logger.error(f"VM {vm_name} failed to become ready within timeout")
         return False
-
-    # def _execute_startup_script(self, vm_name: str, vm_index: int) -> bool:
-    #     """Execute startup script on VM."""
-    #     local_env = None
-    #     try:
-    #         # Upload custom .env file
-    #         local_env = self._make_vm_env(vm_index)
-            
-    #         scp_cmd = [
-    #             "gcloud", "compute", "scp", local_env,
-    #             f"{vm_name}:.env",
-    #             "--project", self.project_id, "--zone", self.zone,
-    #             "--quiet"
-    #         ]
-            
-    #         scp_result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=120)
-    #         success = scp_result.returncode == 0
-            
-    #         if not success:
-    #             self.logger.error(f"Failed to upload script to {vm_name}")
-    #             self.logger.error(f"SCP stdout: {scp_result.stdout}")
-    #             self.logger.error(f"SCP stderr: {scp_result.stderr}")
-    #             return False
-            
-    #         git_install_command = f"apt-get install -y git && sleep 5 && git clone https://{self.extraction_repo_auth}@github.com/{self.extraction_repo}.git extractor"
-            
-    #         ssh_start_command = [
-    #             "gcloud", "compute", "ssh", vm_name,
-    #             "--project", self.project_id, "--zone", self.zone,
-    #             "--command", git_install_command
-    #         ]
-
-    #         ssh_result = subprocess.run(ssh_start_command, capture_output=True, text=True, timeout=600)
-    #         success = ssh_result.returncode == 0
-
-    #         if success:
-    #             self.logger.info(f"Startup script executed successfully on {vm_name}:")
-    #             self.logger.info(f"SSH stdout: {ssh_result.stdout}")
-    #         else:
-    #             self.logger.error(f"Startup script execution failed on {vm_name}")
-    #             self.logger.error(f"SSH stdout: {ssh_result.stdout}")
-    #             self.logger.error(f"SSH stderr: {ssh_result.stderr}")
-            
-    #         return success
-            
-    #     except Exception as e:
-    #         self.logger.error(f"Startup script execution failed for {vm_name}: {e}")
-    #         return False
-    #     finally:
-    #         # Clean up temporary file
-    #         if local_env and os.path.exists(local_env):
-    #             os.remove(local_env)
         
     def _make_vm_env(self, vm_index: int) -> str:
         """Create a on-vm .env file and return the file as a string."""
@@ -509,8 +442,7 @@ DATA_DIRECTORY=data
                     "num_vms": self.num_vms,
                     "start_date": self.start_date,
                     "end_date": self.end_date
-                },
-                "vm_counter": self.vm_counter
+                }
             }
             
             # Create data directory
@@ -540,7 +472,6 @@ DATA_DIRECTORY=data
                     }
                 
                 # Update counter in state
-                state['vm_counter'] = self.vm_counter
                 self._save_state_file(state)
                 
                 # Process results
@@ -627,6 +558,7 @@ DATA_DIRECTORY=data
         """Clean all VMs and delete state file only after confirming all deletions."""
         try:
             state = self._load_state_file()
+
             if not state or not state.get('vms'):
                 return {"status": "no_deployment", "message": "No deployment found to clean up"}
                 
@@ -638,15 +570,16 @@ DATA_DIRECTORY=data
                 try:
                     if self._delete_vm(vm_name):
                         deletion_results[vm_name] = "DELETED"
+                        
                     else:
                         deletion_results[vm_name] = "DELETE_ERROR"
                 except Exception as e:
                     self.logger.error(f"Error deleting VM {vm_name}: {e}")
                     deletion_results[vm_name] = "DELETE_ERROR"
             
-            # Check if any VMs remain in state
-            updated_state = self._load_state_file()
-            remaining_vms = updated_state.get('vms', {}) if updated_state else {}
+            # Check if any VMs remain in state - reload state
+            state = self._load_state_file()
+            remaining_vms = len([vm for vm in list(state['vms'])])
             
             # Remove state file only if no VMs remain
             if not remaining_vms and os.path.exists(self.state_file):
@@ -654,6 +587,7 @@ DATA_DIRECTORY=data
                 self.logger.info("All VMs deleted - state file removed")
                 state_file_removed = True
             else:
+                self.logger.info("VMs remaining or no state file to remove")
                 state_file_removed = False
             
             failed_deletions = sum(1 for result in deletion_results.values() if result != "DELETED")
@@ -672,12 +606,9 @@ DATA_DIRECTORY=data
         
 
     def _get_results(self, vm_name: str) -> None:
-        """Download CSV files from VM's extractor/data directory to local collected_data directory."""
+        """Download CSV files from VM's extractor/data directory to local data/vm_results directory."""
         try:
             self.logger.info(f"Downloading results from VM: {vm_name}")
-            
-            # Ensure local collected_data directory exists
-            os.makedirs('collected_data', exist_ok=True)
             
             # First, list all CSV files in the VM's extractor/data directory
             list_cmd = [
@@ -706,7 +637,7 @@ DATA_DIRECTORY=data
             for remote_file_path in files_to_download:
                 # Extract just the filename from the full path
                 filename = os.path.basename(remote_file_path)
-                local_file_path = os.path.join('collected_data', filename)
+                local_file_path = os.path.join(self.data_dir, filename)
                 
                 # Use SCP to download the file
                 scp_cmd = [

@@ -17,7 +17,6 @@ services:
     volumes:
       - ../data:/app/data
       - ../logs:/app/logs
-      - ./collected_data:/app/collected_data
     restart: no
     # mem_limit: 4g
     # cpus: '2.0'

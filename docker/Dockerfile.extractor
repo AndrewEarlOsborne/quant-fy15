@@ -22,12 +22,11 @@ COPY .env .
 COPY google_auth_creds.json ./extractor-pipeline/google_auth_creds.json
 
 # Create necessary directories
-RUN mkdir -p /app/logs /app/data /app/collected_data
+RUN mkdir -p /app/logs /app/data /app/data/vm_results /app/data/aggregated
 
 # Set environment variables
 ENV PYTHONPATH=/app
 ENV ENVIRONMENT=production
-ENV LOCAL_DATA_DIR=/app/collected_data
 
 # Health check for extraction service
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
