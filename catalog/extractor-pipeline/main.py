@@ -154,13 +154,12 @@ def main():
                     file_path = os.path.join(data_directory, file)
                     df = pd.read_csv(file_path)
                     whale_results = pd.concat([whale_results, df])
-
             
             # Merge results into one 
             aggregate_results:pd.DataFrame = pd.merge(whale_results, validator_results, 'inner', ['interval_start', 'interval_end'])
 
-            logger.debug(" ========== Features found ==========")
-            logger.debug(f"{aggregate_results.columns}")
+            # logger.debug(" ========== Features found ==========")
+            # logger.debug(f"{aggregate_results.columns}")
 
             if not aggregate_results.empty:
                 aggregate_results = aggregate_results.sort_values(["interval_start"])

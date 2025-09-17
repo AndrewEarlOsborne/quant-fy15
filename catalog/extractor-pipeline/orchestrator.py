@@ -96,16 +96,19 @@ class Orchestrator:
         except Exception as e:
             self.logger.error(f"Failed to save state file: {e}")
             
-    def _get_next_vm_name(self) -> str:
+    def _get_next_vm_name(self, attempted_names:dict ) -> str:
         """Generate next available VM name."""
         vm_counter:int = 1
         while True:
             vm_name = f"extractor-{vm_counter:02d}"
-            vm_counter += 1
             
+            state = self._load_state_file()
+
             # Check if VM name is available
-            if not self._vm_exists_in_gcp(vm_name):
+            if not self._vm_exists_in_gcp(vm_name) and not vm_name in attempted_names.keys():
                 return vm_name
+            
+            vm_counter += 1
                 
     def _vm_exists_in_gcp(self, vm_name: str) -> bool:
         """Check if VM exists in GCP."""
@@ -316,7 +319,7 @@ DATA_DIRECTORY=data
             
             if success:
                 self.logger.info(f"Screen session started successfully on {vm_name}")
-                self.logger.info(f"SSH stdout: {ssh_result.stdout}")
+                self.logger.debug(f"SSH stdout: {ssh_result.stdout}")
             else:
                 self.logger.error(f"Failed to start screen session on {vm_name}")
                 self.logger.error(f"SSH stdout: {ssh_result.stdout}")
@@ -454,12 +457,15 @@ DATA_DIRECTORY=data
             failed_vms = []
 
             status = True
-            
+
             with ThreadPoolExecutor(max_workers=min(5, self.num_vms)) as executor:
                 # Submit VM creation tasks
                 futures = {}
+                attempted_names = {}
                 for i in range(self.num_vms):
-                    vm_name = self._get_next_vm_name()
+                    vm_name:str = self._get_next_vm_name(attempted_names)
+                    attempted_names[vm_name] = "Starting"
+
                     future = executor.submit(self._deploy_single_vm, vm_name, i)
                     futures[future] = vm_name
                     
@@ -470,6 +476,8 @@ DATA_DIRECTORY=data
                         "processed_at": None,
                         "vm_index": i
                     }
+
+                    attempted_names[vm_name] = "Started"
                 
                 # Update counter in state
                 self._save_state_file(state)
