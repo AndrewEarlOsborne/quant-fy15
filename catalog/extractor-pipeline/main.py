@@ -162,12 +162,14 @@ def main():
             # logger.debug(f"{aggregate_results.columns}")
 
             if not aggregate_results.empty:
-                aggregate_results = aggregate_results.sort_values(["interval_start"])
 
                 output_filename = f"{str(aggregate_results.iloc[0]['interval_start'])}_{str(aggregate_results.iloc[-1]['interval_start'])}_aggregated.csv"
 
+                ordered_results = aggregate_results[['interval_start','interval_end','whale_count','whale_avg_value_eth','whale_total_value_eth','validator_count','validator_total_value_eth','validator_avg_value_eth','validator_avg_gas_price']]
+                ordered_results = ordered_results.sort_values(["interval_start"])
+
                 output_path = os.path.join(output_file_dir, output_filename)
-                aggregate_results.to_csv(output_path, index=False)
+                ordered_results.to_csv(output_path, index=False)
                 logger.info("Data aggregation completed successfully.")
             else:
                 logger.warning("No transaction data files found to aggregate")
