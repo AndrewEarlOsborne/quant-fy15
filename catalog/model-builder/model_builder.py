@@ -116,7 +116,7 @@ class ModelBuilder():
 
         return results
 
-    def predict(self, x:pd.DataSeries) -> int:
+    def predict(self, x:pd.DataFrame) -> int:
         """Make a classification prediction on new data. Returns the class in range[0, num_classes)"""
         return self.model.predict(x)
 

@@ -7,11 +7,11 @@ import yfinance as yf
 from datetime import datetime, timedelta
 import numpy as np
 import matplotlib.pyplot as plt
-from pydantic import Field
+from pydantic import Field, BaseModel
 import logging
 from sklearn.model_selection import train_test_split
 
-class DataConfig():
+class DataConfig(BaseModel):
     num_classes:int = Field(default = 3, description= "Number of classifications that price can be split into.")
     label_strategy:str = Field(default = "linspace", description= "Strategy for generating labels. Options: 'linspace', 'equal-index'")
     do_balancing:bool = Field(default = False, description = "Boolean indicating if data engineering should curtail the data so that all classifications have equal frequency.")
@@ -200,16 +200,13 @@ def make_labels(data:DataFrame, num_labels: int = 3, strategy="linspace") -> Dat
     # Remove NaN values for labeling
     valid_deltas:pd.Series = df['delta'].dropna()
 
+    splits: list
+
     if strategy == 'linspace':
         # Create quantile-based labels
         quantiles = np.linspace(0, 1, num_labels + 1)
         splits = valid_deltas.quantile(quantiles[1:-1]).values
-
-        # Create labels based on quantiles
-        df['label'] = pd.cut(df['delta'],
-                             bins=[-np.inf] + list(splits) + [np.inf],
-                             labels=list(range(num_labels)),
-                             include_lowest=True)
+        splits.sort
 
     if strategy == 'centered-linspace':
         # Build bins starting with a split or a bin center on 0
@@ -231,10 +228,12 @@ def make_labels(data:DataFrame, num_labels: int = 3, strategy="linspace") -> Dat
 
             [splits.append((x + bin_length/2) * bin_length) for x in range(k)]
 
-        df['label'] = pd.cut(df['delta'],
-                             bins=[-np.inf] + list(splits) + [np.inf],
-                             labels=list(range(num_labels)),
-                             include_lowest=True)
+    splits.sort()
+
+    df['label'] = pd.cut(df['delta'],
+                        bins=[-np.inf] + list(splits) + [np.inf],
+                        labels=list(range(num_labels)),
+                        include_lowest=True)
 
     # Log label distribution
     if 'label' in df.columns:

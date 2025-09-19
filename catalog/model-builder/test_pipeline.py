@@ -1,5 +1,3 @@
-from prediction_model import EthereumPricePredictionModel
-
 from data_engineering import engineer_features, show_label_distribution, DataConfig
 
 from model_builder import ModelBuilder

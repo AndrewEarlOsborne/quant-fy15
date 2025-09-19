@@ -9,19 +9,20 @@ import yfinance as yf
 import tensorflow as tf
 from datetime import datetime, timedelta
 
-from tensorflow.python.keras.models import Model, load_model
-from tensorflow.python.keras.layers import Input, Dense, Dropout, BatchNormalization, Conv1D, Add, Activation, GlobalAveragePooling1D, MultiHeadAttention, LayerNormalization
-from tensorflow.python.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from tensorflow.python.keras.optimizers import AdamW
-from tensorflow.python.keras.regularizers import l2
 
-from sklearn.model_selection import train_test_split, TimeSeriesSplit
+from keras.models import Model, load_model
+from keras.layers import Input, Dense, Dropout, BatchNormalization, Conv1D, Add, Activation, GlobalAveragePooling1D, MultiHeadAttention, LayerNormalization
+from keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from keras.optimizers import AdamW
+from keras.regularizers import l2
+
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, f1_score
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 from sklearn.utils.class_weight import compute_class_weight
 from xgboost import XGBClassifier
-from  tscv import TimeSeriesSplit
+from tscv import *
 
 
 def get_historical_prices(start_date, end_date, interval='1d'):
@@ -77,7 +78,7 @@ class EthereumPricePredictionModel:
     Ethereum price prediction model using stacking ensemble of TCN, Transformer, and XGBoost.
     """
     
-    def __init__(self, window_length=14, meta_classifier='xgb', 
+    def __init__(self, num_classes, window_length=14, meta_classifier='xgb', 
                  investment_rate=1.0, random_seed=42):
         """
         Initialize the prediction model.
@@ -90,7 +91,7 @@ class EthereumPricePredictionModel:
             random_seed (int): Random seed for reproducibility
         """
         self.window_length = window_length
-        self.num_labels: int = None
+        self.num_classes: int = num_classes
         self.meta_classifier = meta_classifier
         self.investment_rate = investment_rate
         self.random_seed = random_seed
