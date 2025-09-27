@@ -3,7 +3,6 @@
 import os
 import pandas as pd
 from pandas import DataFrame
-import yfinance as yf
 from datetime import datetime, timedelta
 import numpy as np
 import matplotlib.pyplot as plt
@@ -18,31 +17,29 @@ class DataConfig(BaseModel):
     window_length:int = Field(default = 10, description = "Length of sliding windows for time series features")
     
 
-def engineer_features(data_dir: str, config: DataConfig) -> DataFrame:
+def engineer_features(config: DataConfig) -> DataFrame:
     """Engineer features for model training, given a directory of VM results."""
 
     logger = logging.getLogger(__name__)
 
     # Get price history first
-    price_history = get_yfinance_features()
+    price_history = get_price_features()
 
     # Initialize whale and validator data
-    best_whale_data = None
-    best_validator_data = None
+    for file in os.listdir('data/aggregated'):
+        if file.endswith('_aggregated.csv'):
+            aggregated_results = pd.read_csv(f"data/aggregated/{file}")
+            logger.info(f'Starting Engineering with file {aggregated_results}')
 
-    # Load whale and validator data if available
-    if os.path.exists(data_dir):
-        for file in os.listdir(data_dir):
-            if file.endswith('_whale_transactions'):
-                best_whale_data = pd.read_csv(os.path.join(data_dir, file))
-            elif file.endswith('_validator_data'):
-                best_validator_data = pd.read_csv(os.path.join(data_dir, file))
+    aggregated_results.head(2)
 
-    # Do feature engineering (merge whale/validator data)
-    engineered_data = do_feature_engineering(price_history, best_whale_data, best_validator_data)
+    aggregated_results['interval_start'] = pd.to_datetime(aggregated_results['interval_start'])
+    aggregated_results['interval_end'] = pd.to_datetime(aggregated_results['interval_end'])
+
+    results_with_price = aggregated_results.merge(price_history, on='interval_start', how='inner')
 
     logger.info(f"Making {config.num_classes} labels using {config.label_strategy}.")
-    labeled_data = make_labels(engineered_data.copy(), config.num_classes, config.label_strategy)
+    labeled_data:pd.DataFrame = make_labels(results_with_price.copy(), config.num_classes, config.label_strategy)
 
     # Remove NaN labels and sort
     _pre_dropna = labeled_data.shape[0]
@@ -55,7 +52,7 @@ def engineer_features(data_dir: str, config: DataConfig) -> DataFrame:
     labeled_data.sort_values(by='date', inplace=True)
 
     # Get feature columns (excluding metadata and target)
-    feature_columns = [col for col in labeled_data.columns if col not in ['date', 'timeOpen', 'close', 'label']]
+    feature_columns = [col for col in labeled_data.columns if col not in ['date', 'interval_start', 'close_price', 'label']]
 
     # Create windowed features
     X = labeled_data[feature_columns].values
@@ -70,11 +67,8 @@ def engineer_features(data_dir: str, config: DataConfig) -> DataFrame:
     y_windowed = y_windowed[:min_samples]
 
     # Create DataFrame with windowed features
-    # Flatten windowed features for each sample
-    n_features = X_windowed.shape[2]
-    window_length = X_windowed.shape[1]
+    window_length = config.window_length
 
-    # Create column names for flattened windows
     windowed_columns = []
     for i in range(window_length):
         for j, feature in enumerate(feature_columns):
@@ -90,73 +84,63 @@ def engineer_features(data_dir: str, config: DataConfig) -> DataFrame:
     # Add metadata columns for the last timestamp (most recent)
     last_indices = labeled_data.index[config.window_length-1:config.window_length-1+min_samples]
     result_df['date'] = labeled_data.loc[last_indices, 'date'].values
-    result_df['timeOpen'] = labeled_data.loc[last_indices, 'timeOpen'].values
+    result_df['interval_start'] = labeled_data.loc[last_indices, 'interval_start'].values
 
     return result_df
 
-def get_yfinance_features() -> DataFrame:
-    """Fetch and engineer features from Yahoo Finance data. Get the prices interval for the time given in .env"""
-    
+def get_price_features() -> DataFrame:
+    """Load and engineer features from local price history data. Get the prices interval for the time given in .env"""
+
     # Get configuration from environment variables
     prediction_interval = os.getenv('PREDICTION_INTERVAL', '1d')
     start_date = os.getenv('START_DATE', '2021-01-01-00:00')
     end_date = os.getenv('END_DATE', '2021-01-01-02:00')
-    
+    price_history_path = os.getenv('PRICE_HISTORY_PATH', 'data/price_history/ETH_UDS_AUG17_TO_SEPT25.csv')
+
     # Parse dates
     start_dt = datetime.strptime(start_date, '%Y-%m-%d-%H:%M')
     end_dt = datetime.strptime(end_date, '%Y-%m-%d-%H:%M')
-    
-    # Set ticker symbol
-    ticker = "ETH-USD"
-    
-    # Fetch data from Yahoo Finance
-    eth_ticker = yf.Ticker(ticker)
-    
-    # Download historical data based on prediction interval
-    hist_data = eth_ticker.history(
-        start=start_dt.strftime('%Y-%m-%d'),
-        end=end_dt.strftime('%Y-%m-%d'),
-        interval=prediction_interval
-    )
-    
-    # Reset index to get date as a column
-    hist_data.reset_index(inplace=True)
-    
-    # Rename columns to match expected format
-    hist_data.rename(columns={
-        'Date': 'timeOpen',
-        'Close': 'close',
-        'Volume': 'volume',
+
+    # Load data from local CSV file
+    hist_data = pd.read_csv(price_history_path)
+
+    hist_data['Open time'] = pd.to_datetime(hist_data['Open time'])
+    hist_data['Close time'] = pd.to_datetime(hist_data['Close time'])
+
+    # Filter data based on date range
+    hist_data = hist_data[
+        (hist_data['Open time'] >= start_dt) &
+        (hist_data['Open time'] <= end_dt)
+    ]
+
+    print(f"Loaded {hist_data.shape[1]} records from local price history")
+
+    # Map Binance columns to expected yfinance format
+    column_mapping = {
+        'Open time': 'interval_start',
+        'Close time': 'interval_end',
         'Open': 'open',
         'High': 'high',
-        'Low': 'low'
-    }, inplace=True)
+        'Low': 'low',
+        'Close': 'close_price',
+        'Volume': 'volume'
+    }
+
+    # Rename columns
+    hist_data = hist_data.rename(columns=column_mapping)
+
+    # Also create trade_volume alias for volume
+    hist_data['trade_volume'] = hist_data['volume']
+
+    # Create date column from interval_start
+    hist_data['date'] = hist_data['interval_start'].dt.date
     
-    # Create interval start and end columns
-    hist_data['interval_start'] = hist_data['timeOpen']
-    
-    # Calculate interval end based on prediction interval
-    if prediction_interval == '1h':
-        hist_data['interval_end'] = hist_data['timeOpen'] + timedelta(hours=1)
-    elif prediction_interval == '1d':
-        hist_data['interval_end'] = hist_data['timeOpen'] + timedelta(days=1)
-    elif prediction_interval == '1wk':
-        hist_data['interval_end'] = hist_data['timeOpen'] + timedelta(weeks=1)
-    elif prediction_interval == '1mo':
-        hist_data['interval_end'] = hist_data['timeOpen'] + timedelta(days=30)
-    else:
-        # Default to 1 day if interval not recognized
-        hist_data['interval_end'] = hist_data['timeOpen'] + timedelta(days=1)
-    
-    # Create date column
-    hist_data['date'] = hist_data['timeOpen'].dt.date
-    
-    # Basic feature engineering
-    hist_data['close'] = pd.to_numeric(hist_data['close'], errors='coerce')
-    hist_data['close'] = hist_data['close'].interpolate(method='linear', limit_direction='both')
+    # Feature engineering
+    hist_data['close_price'] = pd.to_numeric(hist_data['close_price'], errors='coerce')
+    hist_data['close_price'] = hist_data['close_price'].interpolate(method='linear', limit_direction='both')
     
     # Price change features
-    hist_data['delta'] = hist_data['close'].pct_change()
+    hist_data['delta'] = hist_data['close_price'].pct_change()
     hist_data['lag1_delta'] = hist_data['delta'].shift(1, fill_value=0)
     hist_data['lag2_delta'] = hist_data['delta'].shift(2, fill_value=0)
     
@@ -165,24 +149,24 @@ def get_yfinance_features() -> DataFrame:
     hist_data['volume_delta'] = hist_data['volume'].shift(1).pct_change()
     
     # Price range features
-    hist_data['price_range'] = (hist_data['high'] - hist_data['low']) / hist_data['close']
-    hist_data['open_close_ratio'] = hist_data['open'] / hist_data['close']
+    hist_data['price_range'] = (hist_data['high'] - hist_data['low']) / hist_data['close_price']
+    hist_data['open_close_ratio'] = hist_data['open'] / hist_data['close_price']
     
     # Moving averages
-    hist_data['ma_7'] = hist_data['close'].rolling(window=7, min_periods=1).mean()
-    hist_data['ma_14'] = hist_data['close'].rolling(window=14, min_periods=1).mean()
-    hist_data['close_ma7_ratio'] = hist_data['close'] / hist_data['ma_7']
-    hist_data['close_ma14_ratio'] = hist_data['close'] / hist_data['ma_14']
+    hist_data['ma_7'] = hist_data['close_price'].rolling(window=7, min_periods=1).mean()
+    hist_data['ma_14'] = hist_data['close_price'].rolling(window=14, min_periods=1).mean()
+    hist_data['close_ma7_ratio'] = hist_data['close_price'] / hist_data['ma_7']
+    hist_data['close_ma14_ratio'] = hist_data['close_price'] / hist_data['ma_14']
     
     # Volume features
     hist_data['volume_ma_7'] = hist_data['volume'].rolling(window=7, min_periods=1).mean()
     hist_data['volume_ratio'] = hist_data['volume'] / hist_data['volume_ma_7']
     
-    # Fill any remaining NaN values
-    hist_data = hist_data.fillna(method='ffill').fillna(method='bfill')
+    # # Fill any remaining NaN values
+    # hist_data = hist_data.fillna(method='ffill').fillna(method='bfill')
     
     # Sort by date
-    hist_data.sort_values(by='timeOpen', inplace=True)
+    hist_data.sort_values(by='interval_start', inplace=True)
     
     return hist_data
 
@@ -301,70 +285,6 @@ def show_label_distribution(data:DataFrame):
     for label in unique_labels:
         label_count = len(df[df['label'] == label])
         print(f"Label {label}: {label_count} samples ({label_count/len(df)*100:.1f}%)")
-    
-
-def do_feature_engineering(price_data, whale_data=None, validator_data=None) -> pd.DataFrame:
-    """
-    Prepare data for training.
-
-    Args:
-        price_data (DataFrame): Price data
-        whale_data (DataFrame, optional): Whale transaction data
-        validator_data (DataFrame, optional): Validator data
-
-    Returns:
-        DataFrame: Engineered features with price data
-    """
-
-    # Copy to avoid modifying original data
-    result = price_data.copy()
-
-    # Process whale data if provided
-    if whale_data is not None:
-        whale_data = whale_data.copy()
-        if 'date' not in whale_data.columns and 'datetime' in whale_data.columns:
-            whale_data['date'] = pd.to_datetime(whale_data['datetime']).dt.date
-        elif 'date' in whale_data.columns:
-            whale_data['date'] = pd.to_datetime(whale_data['date']).dt.date
-
-        # Aggregate whale data by date
-        if 'valueEth' in whale_data.columns and 'gasPrice' in whale_data.columns:
-            whale_agg = whale_data.groupby('date').agg({
-                'valueEth': ['mean', 'var'],
-                'gasPrice': 'mean'
-            }).reset_index()
-
-            # Flatten column names
-            whale_agg.columns = ['date', 'whale_avg_valueEth', 'whale_var_valueEth', 'whale_avg_gasPrice']
-
-            # Merge with results
-            result = result.merge(whale_agg, on='date', how='left')
-
-    # Process validator data if provided
-    if validator_data is not None:
-        validator_data = validator_data.copy()
-        if 'datetime' in validator_data.columns:
-            validator_data['date'] = pd.to_datetime(validator_data['datetime']).dt.date
-        elif 'date' in validator_data.columns:
-            validator_data['date'] = pd.to_datetime(validator_data['date']).dt.date
-
-        if 'blockHash' in validator_data.columns and 'gasPrice' in validator_data.columns:
-            validator_agg = validator_data.groupby('date').agg(
-                validator_count=('blockHash', 'nunique'),
-                validator_gas_price_avg=('gasPrice', 'mean')
-            ).reset_index()
-
-            validator_agg['validator_count_avg'] = validator_agg['validator_count'].rolling(
-                window=7, min_periods=1
-            ).mean()
-
-            result = result.merge(validator_agg, on='date', how='left')
-
-    # Fill any remaining NaN values
-    # result = result.fillna(method='ffill').fillna(method='bfill')
-
-    return result
-
 
 def _create_windows(data, window_length):
     """Create sliding windows for time series modeling"""

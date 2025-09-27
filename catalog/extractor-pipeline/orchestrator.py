@@ -18,6 +18,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Set
 from dotenv import load_dotenv
+import pandas as pd
 
 
 class Orchestrator:
@@ -39,11 +40,50 @@ class Orchestrator:
         )
         self.logger = logging.getLogger(__name__)
 
+        # Initialize VM failure logging
+        self.failure_logger = logging.getLogger(f"{__name__}.failures")
+        failure_handler = logging.FileHandler("logs/vm_failures.log")
+        failure_handler.setFormatter(logging.Formatter(
+            '%(asctime)s - %(levelname)-8s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        ))
+        self.failure_logger.addHandler(failure_handler)
+        self.failure_logger.setLevel(logging.ERROR)
+
         self._load_config()
         self._initialize_state()
 
         # Initialize data directory path
         self.data_dir = "data/vm_results"
+
+    def _log_vm_failure(self, vm_name: str, operation: str, stdout: str, stderr: str, returncode: int = None):
+        """Log VM failure details to dedicated failure log file."""
+        failure_msg = f"VM {vm_name} - {operation} FAILED"
+        if returncode is not None:
+            failure_msg += f" (exit code: {returncode})"
+
+        self.failure_logger.error(f"\n{'-'*80}")
+        self.failure_logger.error(failure_msg)
+        self.failure_logger.error(f"TIMESTAMP: {datetime.now().isoformat()}")
+
+        # Get VM info from state file including dates and env data
+        state = self._load_state_file()
+        if state and 'vms' in state and vm_name in state['vms']:
+            vm_info = state['vms'][vm_name]
+            self.failure_logger.error(f"VM_INDEX: {vm_info.get('vm_index', 'unknown')}")
+            self.failure_logger.error(f"START_DATE: {vm_info.get('start_date', 'unknown')}")
+            self.failure_logger.error(f"END_DATE: {vm_info.get('end_date', 'unknown')}")
+            self.failure_logger.error(f"CREATED_AT: {vm_info.get('created_at', 'unknown')}")
+
+        if stdout:
+            self.failure_logger.error(f"STDOUT:\n{stdout}")
+        if stderr:
+            self.failure_logger.error(f"STDERR:\n{stderr}")
+
+        self.failure_logger.error(f"{'-'*80}\n")
+
+        # Also log to main logger for immediate visibility
+        self.logger.error(f"VM {vm_name} {operation} failed - details saved to logs/vm_failures.log")
         
     def _load_config(self):
         """Load and validate configuration from .env file."""
@@ -115,7 +155,7 @@ class Orchestrator:
         try:
             cmd = ["gcloud", "compute", "instances", "describe", vm_name,
                    "--project", self.project_id, "--zone", self.zone, "--quiet"]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
             return result.returncode == 0
         except Exception:
             return False
@@ -190,9 +230,7 @@ echo "Setup complete"
             
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if result.returncode != 0:
-                self.logger.error(f"Failed to create VM {vm_name}")
-                self.logger.error(f"########VM creation stdout: ########\n {result.stdout}")
-                self.logger.error(f"########VM creation stderr: ########\n {result.stderr}")
+                self._log_vm_failure(vm_name, "VM_CREATION", result.stdout, result.stderr, result.returncode)
                 return False
             else:
                 self.logger.info(f"VM {vm_name} created successfully")
@@ -213,9 +251,7 @@ echo "Setup complete"
             
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             if result.returncode != 0:
-                self.logger.error(f"VM {vm_name}: Failed to start. Dump: ")
-                self.logger.error(f"{result.stdout}")
-                self.logger.error(f"{result.stderr}")
+                self._log_vm_failure(vm_name, "STARTUP_SCRIPT", result.stdout, result.stderr, result.returncode)
                 return False
             else:
                 self.logger.info(f"VM {vm_name}: Started script executed")
@@ -237,12 +273,10 @@ echo "Setup complete"
                 cmd = ["gcloud", "compute", "instances", "describe", vm_name,
                        "--project", self.project_id, "--zone", self.zone,
                        "--format", "value(status)", "--quiet"]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
                 
                 if result.returncode != 0:
-                    self.logger.error(f"VM {vm_name}: startup failed")
-                    self.logger.error(f"Describe stdout: {result.stdout}")
-                    self.logger.error(f"Describe stderr: {result.stderr}")
+                    self._log_vm_failure(vm_name, "WAIT_RUNNING_STATE", result.stdout, result.stderr, result.returncode)
                     return False
                     
                 vm_status = result.stdout.strip()
@@ -271,7 +305,7 @@ echo "Setup complete"
             except Exception as e:
                 self.logger.error(f"Error checking VM {vm_name}: {e}")
                 
-            time.sleep(15)
+            time.sleep(60)
             
         self.logger.error(f"VM {vm_name} failed to become ready within timeout")
         return False
@@ -321,9 +355,7 @@ DATA_DIRECTORY=data
                 self.logger.info(f"Screen session started successfully on {vm_name}")
                 self.logger.debug(f"SSH stdout: {ssh_result.stdout}")
             else:
-                self.logger.error(f"Failed to start screen session on {vm_name}")
-                self.logger.error(f"SSH stdout: {ssh_result.stdout}")
-                self.logger.error(f"SSH stderr: {ssh_result.stderr}")
+                self._log_vm_failure(vm_name, "START_EXTRACTION", ssh_result.stdout, ssh_result.stderr, ssh_result.returncode)
                 
             return success
             
@@ -338,12 +370,10 @@ DATA_DIRECTORY=data
             cmd = ["gcloud", "compute", "instances", "describe", vm_name,
                    "--project", self.project_id, "--zone", self.zone,
                    "--format", "value(status)", "--quiet"]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
             
             if result.returncode != 0:
-                self.logger.error(f"VM {vm_name} status: Unable to describe")
-                self.logger.error(f"Describe stdout: {result.stdout}")
-                self.logger.error(f"Describe stderr: {result.stderr}")
+                self._log_vm_failure(vm_name, "STATUS_CHECK", result.stdout, result.stderr, result.returncode)
                 return "failed"
                 
             vm_status = result.stdout.strip()
@@ -359,7 +389,7 @@ DATA_DIRECTORY=data
                       "--command", "cat extractor/status.txt 2>/dev/null || echo 'NO_STATUS'",
                       "--quiet"]
             
-            ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=15)
+            ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=30)
             
             if ssh_result.returncode == 0:
                 status_text = ssh_result.stdout.strip()
@@ -390,7 +420,7 @@ DATA_DIRECTORY=data
             self.logger.error(f"Failed to get status for {vm_name}: {e}")
             return "failed"
             
-    def _delete_vm(self, vm_name: str) -> bool:
+    def _delete_vm(self, vm_name: str) -> None:
         """Stop a VM instance."""
         try:
             self.logger.info(f"Stopping VM: {vm_name}")
@@ -413,9 +443,7 @@ DATA_DIRECTORY=data
                     self._save_state_file(state)
 
             else:
-                self.logger.error(f"Failed to stop VM {vm_name}")
-                self.logger.error(f"Stop VM stdout: {result.stdout}")
-                self.logger.error(f"Stop VM stderr: {result.stderr}")
+                self._log_vm_failure(vm_name, "VM_DELETION", result.stdout, result.stderr, result.returncode)
                 
             return success
             
@@ -470,11 +498,14 @@ DATA_DIRECTORY=data
                     futures[future] = vm_name
                     
                     # Add to state immediately
+                    vm_start_date, vm_end_date = self._get_vm_time_range(i)
                     state['vms'][vm_name] = {
                         "status": "initialized",
                         "created_at": datetime.now().isoformat(),
                         "processed_at": None,
-                        "vm_index": i
+                        "vm_index": i,
+                        "start_date": vm_start_date,
+                        "end_date": vm_end_date
                     }
 
                     attempted_names[vm_name] = "Started"
@@ -576,11 +607,9 @@ DATA_DIRECTORY=data
             deletion_results = {}
             for vm_name in list(state['vms'].keys()):
                 try:
-                    if self._delete_vm(vm_name):
-                        deletion_results[vm_name] = "DELETED"
-                        
-                    else:
-                        deletion_results[vm_name] = "DELETE_ERROR"
+                    self._delete_vm(vm_name)
+                    deletion_results[vm_name] = "DELETED"
+
                 except Exception as e:
                     self.logger.error(f"Error deleting VM {vm_name}: {e}")
                     deletion_results[vm_name] = "DELETE_ERROR"
@@ -628,9 +657,7 @@ DATA_DIRECTORY=data
             
             list_result = subprocess.run(list_cmd, capture_output=True, text=True, timeout=60)
             if list_result.returncode != 0:
-                self.logger.error(f"Failed to list files on {vm_name}")
-                self.logger.error(f"List stdout: {list_result.stdout}")
-                self.logger.error(f"List stderr: {list_result.stderr}")
+                self._log_vm_failure(vm_name, "FILE_LISTING", list_result.stdout, list_result.stderr, list_result.returncode)
                 return
             
             files_to_download = [f.strip() for f in list_result.stdout.strip().split('\n') if f.strip()]
@@ -640,13 +667,16 @@ DATA_DIRECTORY=data
                 return
             
             self.logger.info(f"Found {len(files_to_download)} files to download from {vm_name}")
-            
+
+            # Track total observations across all files from this VM
+            total_observations = 0
+
             # Download each file individually to preserve filenames
             for remote_file_path in files_to_download:
                 # Extract just the filename from the full path
                 filename = os.path.basename(remote_file_path)
                 local_file_path = os.path.join(self.data_dir, filename)
-                
+
                 # Use SCP to download the file
                 scp_cmd = [
                     "gcloud", "compute", "scp",
@@ -655,17 +685,26 @@ DATA_DIRECTORY=data
                     local_file_path,
                     "--quiet"
                 ]
-                
+
                 scp_result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=300)
-                
+
                 if scp_result.returncode == 0:
-                    self.logger.info(f"Downloaded {filename} from {vm_name}")
+                    
+                    if filename.endswith('.csv'):
+                        df = pd.read_csv(local_file_path)
+                        if len(df) == 0:
+                            self.logger.warning(f"Downloaded {filename} from {vm_name} but it is empty")
+                            continue
+
+                        self.logger.info(f"Downloaded {filename} from {vm_name}")
                 else:
-                    self.logger.error(f"Failed to download {filename} from {vm_name}")
-                    self.logger.error(f"SCP stdout: {scp_result.stdout}")
-                    self.logger.error(f"SCP stderr: {scp_result.stderr}")
-            
-            self.logger.info(f"Completed downloading results from {vm_name}")
+                    self._log_vm_failure(vm_name, f"FILE_DOWNLOAD_{filename}", scp_result.stdout, scp_result.stderr, scp_result.returncode)
+
+            # Log total observations for this VM
+            if total_observations > 0:
+                self.logger.info(f"Completed downloading results from {vm_name} - Total: {total_observations} observations")
+            else:
+                self.logger.info(f"Completed downloading results from {vm_name}")
             
         except Exception as e:
             self.logger.error(f"Failed to get results from {vm_name}: {e}")

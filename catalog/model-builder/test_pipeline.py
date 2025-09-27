@@ -13,7 +13,7 @@ config = DataConfig(
     window_length = 10,
 )
 
-complete_data = engineer_features(data_dir, config)
+complete_data = engineer_features(config)
 show_label_distribution()
 
 data_file = '~/data/cleaned_data/data'

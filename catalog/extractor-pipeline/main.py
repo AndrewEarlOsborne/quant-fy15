@@ -58,7 +58,7 @@ def main():
         logger.info("=== MONITORING PHASE ===")
         logger.info("Starting enhanced VM monitoring loop with automatic cleanup...")
         
-        check_interval = 20 #TODO raise value for prod
+        check_interval = 300
         start_time = time.time()
         
         while True:

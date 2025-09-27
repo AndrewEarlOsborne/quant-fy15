@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import yfinance as yf
 import tensorflow as tf
 from datetime import datetime, timedelta
 
@@ -27,48 +26,56 @@ from tscv import *
 
 def get_historical_prices(start_date, end_date, interval='1d'):
     """
-    Fetch historical ETH-USD price data and return price changes.
+    Load historical ETH-USD price data from local CSV and return price changes.
 
     Args:
         start_date (str or datetime): Start date for price data
         end_date (str or datetime): End date for price data
-        interval (str): Price interval ('1d', '1h', etc.)
+        interval (str): Price interval ('1d', '1h', etc.) - currently ignored, using available data
 
     Returns:
         np.ndarray: Array of price changes (returns)
     """
     try:
-        # Convert dates to string format if needed
-        if isinstance(start_date, datetime):
-            start_str = start_date.strftime('%Y-%m-%d')
+        # Convert dates to datetime if needed
+        if isinstance(start_date, str):
+            start_dt = pd.to_datetime(start_date)
         else:
-            start_str = str(start_date)
+            start_dt = pd.to_datetime(start_date)
 
-        if isinstance(end_date, datetime):
-            end_str = end_date.strftime('%Y-%m-%d')
+        if isinstance(end_date, str):
+            end_dt = pd.to_datetime(end_date)
         else:
-            end_str = str(end_date)
+            end_dt = pd.to_datetime(end_date)
 
-        # Fetch ETH-USD data from Yahoo Finance
-        eth_ticker = yf.Ticker("ETH-USD")
-        hist_data = eth_ticker.history(
-            start=start_str,
-            end=end_str,
-            interval=interval
-        )
+        # Load data from local CSV file
+        price_history_path = os.getenv('PRICE_HISTORY_PATH', 'data/price_history/ETH_UDS_AUG17_TO_SEPT25.csv')
 
-        if hist_data.empty:
-            print(f"Warning: No price data found for {start_str} to {end_str}")
+        if not os.path.exists(price_history_path):
+            print(f"Warning: Price history file not found at {price_history_path}")
             return np.array([])
 
-        # Calculate price changes (returns)
+        hist_data = pd.read_csv(price_history_path)
+
+        # Convert timestamp and filter by date range
+        hist_data['Open time'] = pd.to_datetime(hist_data['Open time'])
+        hist_data = hist_data[
+            (hist_data['Open time'] >= start_dt) &
+            (hist_data['Open time'] <= end_dt)
+        ].sort_values('Open time')
+
+        if hist_data.empty:
+            print(f"Warning: No price data found for {start_dt.date()} to {end_dt.date()}")
+            return np.array([])
+
+        # Calculate price changes (returns) using Close prices
         close_prices = hist_data['Close'].values
         price_changes = np.diff(close_prices) / close_prices[:-1]
 
         return price_changes
 
     except Exception as e:
-        print(f"Error fetching historical prices: {e}")
+        print(f"Error loading historical prices: {e}")
         return np.array([])
 
 
