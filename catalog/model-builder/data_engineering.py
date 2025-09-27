@@ -3,12 +3,10 @@
 import os
 import pandas as pd
 from pandas import DataFrame
-from datetime import datetime, timedelta
 import numpy as np
 import matplotlib.pyplot as plt
 from pydantic import Field, BaseModel
 import logging
-from sklearn.model_selection import train_test_split
 
 class DataConfig(BaseModel):
     num_classes:int = Field(default = 3, description= "Number of classifications that price can be split into.")
@@ -33,10 +31,19 @@ def engineer_features(config: DataConfig) -> DataFrame:
 
     aggregated_results.head(2)
 
-    aggregated_results['interval_start'] = pd.to_datetime(aggregated_results['interval_start'])
-    aggregated_results['interval_end'] = pd.to_datetime(aggregated_results['interval_end'])
+    # Convert to datetime and truncate to hour level (remove minutes/seconds)
+    aggregated_results['interval_start'] = pd.to_datetime(aggregated_results['interval_start']).dt.floor('H')
+    aggregated_results['interval_end'] = pd.to_datetime(aggregated_results['interval_end']).dt.floor('H')
+
+    # Remove duplicates - keep first observation if multiple in same hour
+    pre_dedup_count = len(aggregated_results)
+    aggregated_results = aggregated_results.drop_duplicates(subset=['interval_start'], keep='first')
+    post_dedup_count = len(aggregated_results)
+    logger.info(f"Removed {pre_dedup_count - post_dedup_count} duplicate observations in same hour")
 
     results_with_price = aggregated_results.merge(price_history, on='interval_start', how='inner')
+
+    print(f"Unmerged Shapes{aggregated_results.shape} x {price_history.shape} :: Merged shape: {results_with_price.shape}")
 
     logger.info(f"Making {config.num_classes} labels using {config.label_strategy}.")
     labeled_data:pd.DataFrame = make_labels(results_with_price.copy(), config.num_classes, config.label_strategy)
@@ -52,7 +59,8 @@ def engineer_features(config: DataConfig) -> DataFrame:
     labeled_data.sort_values(by='date', inplace=True)
 
     # Get feature columns (excluding metadata and target)
-    feature_columns = [col for col in labeled_data.columns if col not in ['date', 'interval_start', 'close_price', 'label']]
+    sensitive_cols = ['interval_start', 'close_price', 'label', 'delta']
+    feature_columns = [col for col in labeled_data.columns if col not in sensitive_cols]
 
     # Create windowed features
     X = labeled_data[feature_columns].values
@@ -61,7 +69,7 @@ def engineer_features(config: DataConfig) -> DataFrame:
     X_windowed = _create_windows(X, config.window_length)
     y_windowed = y[config.window_length-1:]
 
-    # Ensure same number of samples
+    # date based balancing # TODO
     min_samples = min(len(X_windowed), len(y_windowed))
     X_windowed = X_windowed[:min_samples]
     y_windowed = y_windowed[:min_samples]
@@ -83,39 +91,31 @@ def engineer_features(config: DataConfig) -> DataFrame:
 
     # Add metadata columns for the last timestamp (most recent)
     last_indices = labeled_data.index[config.window_length-1:config.window_length-1+min_samples]
-    result_df['date'] = labeled_data.loc[last_indices, 'date'].values
-    result_df['interval_start'] = labeled_data.loc[last_indices, 'interval_start'].values
+
+    # Add all metadata columns (sensitive_cols already includes interval_start, date is separate)
+    metadata_cols = sensitive_cols + ['date']
+    for col in metadata_cols:
+        if col not in result_df.columns:  # Avoid overwriting existing columns
+            result_df[col] = labeled_data.loc[last_indices, col].values
 
     return result_df
 
 def get_price_features() -> DataFrame:
     """Load and engineer features from local price history data. Get the prices interval for the time given in .env"""
 
-    # Get configuration from environment variables
-    prediction_interval = os.getenv('PREDICTION_INTERVAL', '1d')
-    start_date = os.getenv('START_DATE', '2021-01-01-00:00')
-    end_date = os.getenv('END_DATE', '2021-01-01-02:00')
-    price_history_path = os.getenv('PRICE_HISTORY_PATH', 'data/price_history/ETH_UDS_AUG17_TO_SEPT25.csv')
+    for file in os.listdir('data/price_history/'):
+        if not file.endswith('.csv'):
+            continue
+        # print(f"Loading price history from {file}")
+        hist_data = pd.read_csv(f'data/price_history/{file}')
 
-    # Parse dates
-    start_dt = datetime.strptime(start_date, '%Y-%m-%d-%H:%M')
-    end_dt = datetime.strptime(end_date, '%Y-%m-%d-%H:%M')
-
-    # Load data from local CSV file
-    hist_data = pd.read_csv(price_history_path)
-
-    hist_data['Open time'] = pd.to_datetime(hist_data['Open time'])
-    hist_data['Close time'] = pd.to_datetime(hist_data['Close time'])
-
-    # Filter data based on date range
-    hist_data = hist_data[
-        (hist_data['Open time'] >= start_dt) &
-        (hist_data['Open time'] <= end_dt)
-    ]
+    # Convert to datetime and truncate to hour level for consistent matching
+    hist_data['Open time'] = pd.to_datetime(hist_data['Open time']).dt.floor('H')
+    hist_data['Close time'] = pd.to_datetime(hist_data['Close time']).dt.floor('H')
 
     print(f"Loaded {hist_data.shape[1]} records from local price history")
 
-    # Map Binance columns to expected yfinance format
+    # TODO: handle other data sources
     column_mapping = {
         'Open time': 'interval_start',
         'Close time': 'interval_end',
@@ -128,6 +128,9 @@ def get_price_features() -> DataFrame:
 
     # Rename columns
     hist_data = hist_data.rename(columns=column_mapping)
+
+    # Remove duplicates in same hour - keep first observation
+    hist_data = hist_data.drop_duplicates(subset=['interval_start'], keep='first')
 
     # Also create trade_volume alias for volume
     hist_data['trade_volume'] = hist_data['volume']
@@ -255,11 +258,14 @@ def show_label_distribution(data:DataFrame):
     # Get unique labels for coloring
     unique_labels = sorted(df['label'].unique())
     colors = plt.cm.Set3(np.linspace(0, 1, len(unique_labels)))
-    
-    # Plot histogram for each label
+
+    data_min, data_max = df['delta_pct'].min(), df['delta_pct'].max()
+    bins = np.linspace(data_min, data_max, 51)
+
+    # Plot histogram for each label using the same bins
     for i, label in enumerate(unique_labels):
         label_data = df[df['label'] == label]['delta_pct']
-        ax.hist(label_data, bins=50, alpha=0.7, label=f'Label {label}', 
+        ax.hist(label_data, bins=bins, alpha=0.7, label=f'Label {label}',
                color=colors[i], edgecolor='black', linewidth=0.5)
     
     # Customize the plot

@@ -677,6 +677,11 @@ DATA_DIRECTORY=data
                 filename = os.path.basename(remote_file_path)
                 local_file_path = os.path.join(self.data_dir, filename)
 
+                # Backup existing file if it exists
+                backup_path = local_file_path + '.backup'
+                if os.path.exists(local_file_path):
+                    os.rename(local_file_path, backup_path)
+
                 # Use SCP to download the file
                 scp_cmd = [
                     "gcloud", "compute", "scp",
@@ -689,15 +694,21 @@ DATA_DIRECTORY=data
                 scp_result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=300)
 
                 if scp_result.returncode == 0:
-                    
+
                     if filename.endswith('.csv'):
                         df = pd.read_csv(local_file_path)
-                        if len(df) == 0:
-                            self.logger.warning(f"Downloaded {filename} from {vm_name} but it is empty")
+                        if len(df) == 0 and os.path.exists(backup_path):
+                            os.rename(backup_path, local_file_path)
                             continue
+                        elif os.path.exists(backup_path):
+                            os.remove(backup_path)
 
                         self.logger.info(f"Downloaded {filename} from {vm_name}")
+                    elif os.path.exists(backup_path):
+                        os.remove(backup_path)
                 else:
+                    if os.path.exists(backup_path):
+                        os.rename(backup_path, local_file_path)
                     self._log_vm_failure(vm_name, f"FILE_DOWNLOAD_{filename}", scp_result.stdout, scp_result.stderr, scp_result.returncode)
 
             # Log total observations for this VM

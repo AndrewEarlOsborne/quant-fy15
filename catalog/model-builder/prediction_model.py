@@ -9,7 +9,7 @@ import tensorflow as tf
 from datetime import datetime, timedelta
 
 
-from keras.models import Model, load_model
+from tensorflow.keras.models import Model, load_model
 from keras.layers import Input, Dense, Dropout, BatchNormalization, Conv1D, Add, Activation, GlobalAveragePooling1D, MultiHeadAttention, LayerNormalization
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from keras.optimizers import AdamW
@@ -92,7 +92,7 @@ class EthereumPricePredictionModel:
         
         Args:
             window_length (int): Length of time series windows
-            num_labels (int): Number of prediction classes
+            num_classes (int): Number of prediction classes
             meta_classifier (str): Type of meta classifier ('rf', 'svm', 'xgb')
             investment_rate (float): Investment rate for backtesting
             random_seed (int): Random seed for reproducibility
@@ -144,21 +144,21 @@ class EthereumPricePredictionModel:
             out = Activation('relu')(out)
             return out
         
-        inputs = Input(shape=(self.window_length, input_features))
+        inputs = Input(shape=(10, input_features))
         x = inputs
         
         for d in [1, 2]:
             x = residual_block(x, filters=16, kernel_size=3, dilation_rate=d)
         
         x = GlobalAveragePooling1D()(x)
-        outputs = Dense(self.num_labels, activation='softmax', 
+        outputs = Dense(self.num_classes, activation='softmax', 
                        kernel_regularizer=l2(0.01))(x)
         
         return Model(inputs, outputs, name="TCN")
     
     def _build_transformer_model(self, input_features):
         """Build Transformer model"""
-        inputs = Input(shape=(self.window_length, input_features))
+        inputs = Input(shape=(10, input_features))
         x = inputs
         
         attn_output = MultiHeadAttention(num_heads=2, key_dim=16)(x, x)
@@ -169,7 +169,7 @@ class EthereumPricePredictionModel:
         x = LayerNormalization(epsilon=1e-6)(x + ffn)
         
         x = GlobalAveragePooling1D()(x)
-        outputs = Dense(self.num_labels, activation='softmax', 
+        outputs = Dense(self.num_classes, activation='softmax', 
                        kernel_regularizer=l2(0.01))(x)
         
         return Model(inputs, outputs, name="Transformer")
@@ -180,7 +180,7 @@ class EthereumPricePredictionModel:
         train_preds = np.zeros(len(y_train))
         test_preds_list = []
 
-        tscv = TimeSeriesSplit(num_splits = self.num_labels)
+        tscv = TimeSeriesSplit(n_splits = self.num_classes)
         
         for fold, (train_idx, val_idx) in enumerate(tscv.split(X_train)):
             X_tr, X_val = X_train[train_idx], X_train[val_idx]
@@ -222,12 +222,13 @@ class EthereumPricePredictionModel:
         train_preds = np.zeros(len(y))
         test_preds_list = []
 
-        tscv = TimeSeriesSplit(num_splits = self.num_labels)
+        tscv = TimeSeriesSplit(n_splits = self.num_classes)
         
         for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
             X_tr = X[train_idx].reshape(len(train_idx), -1)
             X_val = X[val_idx].reshape(len(val_idx), -1)
-            y_tr = y[train_idx], y[val_idx]
+            y_tr = y[train_idx]
+            y_val = y[val_idx]
             
             model.fit(X_tr, y_tr)
             train_preds[val_idx] = model.predict(X_val)
@@ -239,17 +240,36 @@ class EthereumPricePredictionModel:
     def train(self, data):
         """
         Train the stacking ensemble model.
-        
+
         Args:
-            data_dict (dict): Data dictionary from prepare_data()
-        d"""
-        
-        X_train_windowed = data[self.feature_columns]
-        y_train_windowed = data[['label']]
-        
+            data (pd.DataFrame): DataFrame containing features and labels
+        """
+
+        # Automatically determine feature columns if not set
+        if self.feature_columns is None:
+            exclude_cols = ['label', 'interval_start', 'close_price', 'delta', 'date', 'Unnamed: 0']
+            # Also exclude date/time columns that contain strings
+            exclude_patterns = ['interval_end_x', 'interval_end_y', 'date_t-']
+            self.feature_columns = [col for col in data.columns
+                                  if col not in exclude_cols and
+                                  not any(pattern in col for pattern in exclude_patterns)]
+
+        X_train_windowed = data[self.feature_columns].values
+        y_train_windowed = data['label'].values
+
+        # Reshape data for time series models
+        # Data is already windowed with timestep suffixes (t-0, t-1, ..., t-9)
+        num_features = len(self.feature_columns)
+
+        # The actual window length is determined by the data structure (10 timesteps)
+        actual_window_length = 10  # Based on t-0 to t-9 pattern
+        features_per_timestep = num_features // actual_window_length
+
+        X_train_windowed = X_train_windowed.reshape(X_train_windowed.shape[0], actual_window_length, features_per_timestep)
+
         # Initialize base models
-        self.tcn_model = self._build_tcn_model(X_train_windowed.shape[2])
-        self.transformer_model = self._build_transformer_model(X_train_windowed.shape[2])
+        self.tcn_model = self._build_tcn_model(features_per_timestep)
+        self.transformer_model = self._build_transformer_model(features_per_timestep)
         self.xgb_model = XGBClassifier(
             n_estimators=100, max_depth=5, learning_rate=0.2, 
             random_state=self.random_seed
@@ -362,7 +382,7 @@ class EthereumPricePredictionModel:
 
             # Plot confusion matrix
             plt.subplot(2, 2, 1)
-            class_names = [f'Class {i}' for i in range(self.num_labels)]
+            class_names = [f'Class {i}' for i in range(self.num_classes)]
             sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
                        xticklabels=class_names, yticklabels=class_names)
             plt.title('Confusion Matrix')
@@ -388,17 +408,17 @@ class EthereumPricePredictionModel:
             # Plot class-wise accuracy
             plt.subplot(2, 2, 4)
             class_accuracies = []
-            for i in range(self.num_labels):
+            for i in range(self.num_classes):
                 if str(i) in class_report:
                     class_accuracies.append(class_report[str(i)]['f1-score'])
                 else:
                     class_accuracies.append(0)
 
-            plt.bar(range(self.num_labels), class_accuracies, alpha=0.7, color='lightgreen')
+            plt.bar(range(self.num_classes), class_accuracies, alpha=0.7, color='lightgreen')
             plt.title('Class-wise F1 Scores')
             plt.xlabel('Class')
             plt.ylabel('F1 Score')
-            plt.xticks(range(self.num_labels))
+            plt.xticks(range(self.num_classes))
 
             plt.tight_layout()
             plt.show()
@@ -492,7 +512,7 @@ class EthereumPricePredictionModel:
             # Get risk management rate from environment variable
             max_loss_rate = float(os.getenv('STRATEGY_STOP_LOSS_RATE', '0.05'))
 
-            if self.num_labels == 3:
+            if self.num_classes == 3:
                 if predictions[i] == 2:  # Buy signal
                     # Limit losses using environment variable
                     capped_return = max(price_deltas[i], -max_loss_rate)
@@ -510,7 +530,7 @@ class EthereumPricePredictionModel:
                     positions.append(0)
             else:
                 # Generic approach for any number of classes
-                if predictions[i] > (self.num_labels - 1) // 2:
+                if predictions[i] > (self.num_classes - 1) // 2:
                     # Upper half of classes = buy signal
                     capped_return = max(price_deltas[i], -max_loss_rate)
                     capital_change = model_history[-1] * capped_return * self.investment_rate
@@ -582,7 +602,7 @@ class EthereumPricePredictionModel:
 
             # Position distribution
             plt.subplot(2, 2, 4)
-            pos_labels = ['Short', 'Hold', 'Long'] if self.num_labels == 3 else [f'Pos {i}' for i in set(positions)]
+            pos_labels = ['Short', 'Hold', 'Long'] if self.num_classes == 3 else [f'Pos {i}' for i in set(positions)]
             pos_counts = [positions.count(i) for i in sorted(set(positions))]
             plt.pie(pos_counts, labels=pos_labels, autopct='%1.1f%%', startangle=90)
             plt.title('Position Distribution')
@@ -621,7 +641,7 @@ class EthereumPricePredictionModel:
         # Save model components
         model_data = {
             'window_length': self.window_length,
-            'num_labels': self.num_labels,
+            'num_classes': self.num_classes,
             'meta_classifier': self.meta_classifier,
             'investment_rate': self.investment_rate,
             'random_seed': self.random_seed,
@@ -631,8 +651,8 @@ class EthereumPricePredictionModel:
         }
         
         # Save Keras models
-        self.tcn_model.save(f"{filepath}_tcn.h5")
-        self.transformer_model.save(f"{filepath}_transformer.h5")
+        self.tcn_model.save(f"{filepath}_tcn.keras")
+        self.transformer_model.save(f"{filepath}_transformer.keras")
         
         # Save sklearn models
         joblib.dump(self.xgb_model, f"{filepath}_xgb.pkl")
@@ -660,8 +680,8 @@ class EthereumPricePredictionModel:
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
         # Save TensorFlow models
-        self.tcn_model.save(f"{filepath}_tcn.h5")
-        self.transformer_model.save(f"{filepath}_transformer.h5")
+        self.tcn_model.save(f"{filepath}_tcn.keras")
+        self.transformer_model.save(f"{filepath}_transformer.keras")
         
     
     @classmethod
@@ -674,8 +694,8 @@ class EthereumPricePredictionModel:
             filepath (str): Base path to the saved TensorFlow models
         """
         # Load TensorFlow models
-        instance.tcn_model = load_model(f"{filepath}_tcn.h5")
-        instance.transformer_model = load_model(f"{filepath}_transformer.h5")
+        instance.tcn_model = load_model(f"{filepath}_tcn.keras")
+        instance.transformer_model = load_model(f"{filepath}_transformer.keras")
         
     
     @classmethod
@@ -696,15 +716,15 @@ class EthereumPricePredictionModel:
         # Create model instance
         model = cls(
             window_length=model_data['window_length'],
-            num_labels=model_data['num_labels'],
+            num_classes=model_data['num_classes'],
             meta_classifier=model_data['meta_classifier'],
             investment_rate=model_data['investment_rate'],
             random_seed=model_data['random_seed']
         )
         
         # Load model components
-        model.tcn_model = load_model(f"{filepath}_tcn.h5")
-        model.transformer_model = load_model(f"{filepath}_transformer.h5")
+        model.tcn_model = load_model(f"{filepath}_tcn.keras")
+        model.transformer_model = load_model(f"{filepath}_transformer.keras")
         model.xgb_model = joblib.load(f"{filepath}_xgb.pkl")
         model.meta_model = joblib.load(f"{filepath}_meta.pkl")
         

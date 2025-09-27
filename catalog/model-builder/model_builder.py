@@ -13,9 +13,15 @@ class ModelBuilder():
         self.investment_rate = float(os.getenv('TRADER_INVESTMENT_RATE', '1.0'))
         self.window_length = int(os.getenv('MODEL_WINDOW_LENGTH', '14'))
 
-        self.model_dir = os.path.expanduser('~/data/model')
+        self.model_dir = os.path.expanduser('data/model')
 
-        if not os.path.isdir(self.model_dir):
+        if os.path.isdir(self.model_dir):
+            print(f"Loading existing model from {self.model_dir}")
+            self.model = EthereumPricePredictionModel.load_model(os.path.join(self.model_dir, "eth_prediction_model"))
+            self.training_data = self._load_training_data()
+            self.evaluation_data = self._load_evaluation_data()
+            self.start_date, self.end_date = self._load_date_range()
+        else:
             self.model: EthereumPricePredictionModel = EthereumPricePredictionModel(
                 window_length=self.window_length,
                 num_classes=self.num_classes,
@@ -25,12 +31,8 @@ class ModelBuilder():
             self.evaluation_data: pd.DataFrame = None
             self.start_date = None
             self.end_date = None
-        else:
-            self.model = EthereumPricePredictionModel.load_model(os.path.join(self.model_dir, "eth_prediction_model"))
-            self.training_data = self._load_training_data()
-            self.evaluation_data = self._load_evaluation_data()
-            self.start_date, self.end_date = self._load_date_range()
 
+            
     def load_data(self, data_file: str, test_train_split: float = 0.0):
 
         data = pd.read_csv(data_file)
@@ -38,8 +40,8 @@ class ModelBuilder():
         # Convert date columns to datetime for comparison
         data['date'] = pd.to_datetime(data['date'])
 
-        start_date = min(data['date'].min())
-        end_date = max(data['date'].max())
+        start_date = data['date'].min()
+        end_date = data['date'].max()
 
         if self.start_date is None:
             self.start_date = start_date
@@ -70,7 +72,7 @@ class ModelBuilder():
             else:
                 self.evaluation_data = pd.concat([self.evaluation_data, test], ignore_index=True)
 
-    def _train(self):
+    def train(self):
 
         if self.training_data is not None and not self.training_data.empty:
             self.model.train(self.training_data)
@@ -86,25 +88,10 @@ class ModelBuilder():
 
         self.training_data = None
 
-    def update_model(self, data_dir: str):
-        """Update the model with new data from a directory."""
-        if not os.path.isdir(data_dir):
-            raise ValueError(f"Data directory does not exist: {data_dir}")
-
-        for file in os.listdir(data_dir):
-            if file.endswith('.csv'):
-                file_path = os.path.join(data_dir, file)
-                self.load_data(file_path, test_train_split=0)
-
-        self._train()
-
     def evaluate(self):
         """Evaluate the model using evaluation data."""
         if self.evaluation_data is None or self.evaluation_data.empty:
             raise ValueError("No evaluation data available. Load data first.")
-
-        if not self.model.is_trained:
-            raise ValueError("Model must be trained before evaluation.")
 
         # Set evaluation data in the model and evaluate
         self.model.evaluation_data = self.evaluation_data
