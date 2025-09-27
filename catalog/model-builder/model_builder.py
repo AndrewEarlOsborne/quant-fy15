@@ -40,6 +40,18 @@ class ModelBuilder():
         # Convert date columns to datetime for comparison
         data['date'] = pd.to_datetime(data['date'])
 
+        # Fix dtype issues - convert all numeric columns to float32
+        numeric_columns = data.select_dtypes(include=['object']).columns
+        for col in numeric_columns:
+            if col not in ['date', 'interval_start', 'interval_end_x', 'interval_end_y']:
+                try:
+                    data[col] = pd.to_numeric(data[col], errors='coerce').astype('float32')
+                except:
+                    pass
+
+        # Handle NaN values
+        data = data.fillna(0.0)
+
         start_date = data['date'].min()
         end_date = data['date'].max()
 
@@ -73,14 +85,11 @@ class ModelBuilder():
                 self.evaluation_data = pd.concat([self.evaluation_data, test], ignore_index=True)
 
     def train(self):
-
         if self.training_data is not None and not self.training_data.empty:
             self.model.train(self.training_data)
         else:
             raise ValueError("No loaded training data")
 
-        # Save state before clearing training data
-        self.save_state()
 
         # Save model to both default location and model_dir
         self.model.save_model("models/eth_prediction_model")
@@ -130,23 +139,3 @@ class ModelBuilder():
             with open(date_range_path, 'rb') as f:
                 return pickle.load(f)
         return None, None
-
-    def save_state(self):
-        """Save training data, evaluation data, and date range to filestate."""
-        os.makedirs(self.model_dir, exist_ok=True)
-
-        if self.training_data is not None:
-            training_data_path = os.path.join(self.model_dir, "training_data.pkl")
-            with open(training_data_path, 'wb') as f:
-                pickle.dump(self.training_data, f)
-
-        if self.evaluation_data is not None:
-            evaluation_data_path = os.path.join(self.model_dir, "evaluation_data.pkl")
-            with open(evaluation_data_path, 'wb') as f:
-                pickle.dump(self.evaluation_data, f)
-
-        if self.start_date is not None and self.end_date is not None:
-            date_range_path = os.path.join(self.model_dir, "date_range.pkl")
-            with open(date_range_path, 'wb') as f:
-                pickle.dump((self.start_date, self.end_date), f)
-

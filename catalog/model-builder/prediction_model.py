@@ -1,12 +1,14 @@
 import os
 import pickle
 import joblib
+import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import tensorflow as tf
 from datetime import datetime, timedelta
+from tqdm import tqdm
 
 
 from tensorflow.keras.models import Model, load_model
@@ -21,6 +23,39 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 from sklearn.utils.class_weight import compute_class_weight
 from xgboost import XGBClassifier
+
+
+class TqdmCallback(tf.keras.callbacks.Callback):
+    """Custom Keras callback for tqdm progress tracking during training"""
+
+    def __init__(self, fold_num, total_folds, model_name):
+        super().__init__()
+        self.fold_num = fold_num
+        self.total_folds = total_folds
+        self.model_name = model_name
+        self.pbar = None
+
+    def on_train_begin(self, logs=None):
+        self.pbar = tqdm(
+            total=self.params['epochs'],
+            desc=f"{self.model_name} - Fold {self.fold_num}/{self.total_folds}",
+            leave=False,
+            position=1
+        )
+
+    def on_epoch_end(self, epoch, logs=None):
+        if self.pbar:
+            loss = logs.get('loss', 0)
+            val_loss = logs.get('val_loss', 0)
+            self.pbar.set_postfix({
+                'loss': f'{loss:.4f}',
+                'val_loss': f'{val_loss:.4f}'
+            })
+            self.pbar.update(1)
+
+    def on_train_end(self, logs=None):
+        if self.pbar:
+            self.pbar.close()
 from tscv import *
 
 
@@ -175,17 +210,21 @@ class EthereumPricePredictionModel:
         return Model(inputs, outputs, name="Transformer")
     
     def _train_keras_model(self, model, X_train, y_train,
-                          epochs=100, batch_size=64):
+                          epochs=100, batch_size=64, model_name="Model"):
         """Train Keras model with time series cross-validation"""
         train_preds = np.zeros(len(y_train))
         test_preds_list = []
 
         tscv = TimeSeriesSplit(n_splits = self.num_classes)
-        
-        for fold, (train_idx, val_idx) in enumerate(tscv.split(X_train)):
+        total_folds = self.num_classes
+
+        for fold_idx, (train_idx, val_idx) in enumerate(tscv.split(X_train)):
+            fold_num = fold_idx + 1
+            fold_start_time = time.time()
+
             X_tr, X_val = X_train[train_idx], X_train[val_idx]
             y_tr, y_val = y_train[train_idx], y_train[val_idx]
-            
+
             model_fold = tf.keras.models.clone_model(model)
             model_fold.compile(
                 optimizer=AdamW(learning_rate=0.0005),
@@ -193,47 +232,67 @@ class EthereumPricePredictionModel:
                 loss='sparse_categorical_crossentropy',
                 metrics=['accuracy']
             )
-            
-            class_weights = compute_class_weight('balanced', 
+
+            class_weights = compute_class_weight('balanced',
                                                classes=np.unique(y_tr), y=y_tr)
             class_weight_dict = dict(enumerate(class_weights))
-            
+
+            tqdm_callback = TqdmCallback(fold_num, total_folds, model_name)
+
             model_fold.fit(
                 X_tr, y_tr,
                 epochs=epochs,
                 batch_size=batch_size,
                 validation_data=(X_val, y_val),
                 callbacks=[
-                    EarlyStopping(monitor='val_loss', patience=10, 
+                    EarlyStopping(monitor='val_loss', patience=10,
                                 restore_best_weights=True, verbose=0),
-                    ReduceLROnPlateau(monitor='val_loss', factor=0.5, 
-                                    patience=5, verbose=0)
+                    ReduceLROnPlateau(monitor='val_loss', factor=0.5,
+                                    patience=5, verbose=0),
+                    tqdm_callback
                 ],
                 class_weight=class_weight_dict,
                 verbose=0
             )
+
+            fold_time = time.time() - fold_start_time
+            print(f"    Fold {fold_num} completed in {fold_time:.1f}s")
             
             train_preds[val_idx] = np.argmax(model_fold.predict(X_val, verbose=0), axis=1)
         
         return train_preds
     
-    def _train_sklearn_model(self, model, X, y):
+    def _train_sklearn_model(self, model, X, y, model_name="Sklearn Model"):
         """Train sklearn model given an X, y pair with time series cross-validation"""
         train_preds = np.zeros(len(y))
         test_preds_list = []
 
         tscv = TimeSeriesSplit(n_splits = self.num_classes)
-        
-        for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
+        total_folds = self.num_classes
+
+        fold_pbar = tqdm(enumerate(tscv.split(X)), total=total_folds,
+                         desc=f"{model_name} Training", leave=False, position=1)
+
+        for fold_idx, (train_idx, val_idx) in fold_pbar:
+            fold_num = fold_idx + 1
+            fold_start_time = time.time()
+
             X_tr = X[train_idx].reshape(len(train_idx), -1)
             X_val = X[val_idx].reshape(len(val_idx), -1)
             y_tr = y[train_idx]
             y_val = y[val_idx]
-            
+
             model.fit(X_tr, y_tr)
             train_preds[val_idx] = model.predict(X_val)
             test_preds_list.append(model.predict(X.reshape(len(X), -1)))
-        
+
+            fold_time = time.time() - fold_start_time
+            fold_pbar.set_postfix({
+                'fold': f'{fold_num}/{total_folds}',
+                'time': f'{fold_time:.1f}s'
+            })
+
+        fold_pbar.close()
         return train_preds
     
     
@@ -267,32 +326,65 @@ class EthereumPricePredictionModel:
 
         X_train_windowed = X_train_windowed.reshape(X_train_windowed.shape[0], actual_window_length, features_per_timestep)
 
-        # Initialize base models
+        # Initialize models
+        print("Initializing models...")
         self.tcn_model = self._build_tcn_model(features_per_timestep)
         self.transformer_model = self._build_transformer_model(features_per_timestep)
         self.xgb_model = XGBClassifier(
-            n_estimators=100, max_depth=5, learning_rate=0.2, 
+            n_estimators=100, max_depth=5, learning_rate=0.2,
             random_state=self.random_seed
         )
-        
-        # Train base models
+
+        # Training progress
+        print("\n" + "="*60)
+        print("ETHEREUM TRADING MODEL TRAINING")
+        print("="*60)
+
+        training_start_time = time.time()
+        stages = ["TCN", "Transformer", "XGBoost", "Meta-Classifier"]
+
+        # Overall training progress bar
+        main_pbar = tqdm(total=4, desc="Overall Training Progress", position=0, leave=True)
+
+        # Stage 1: TCN Training
+        print(f"\n[1/4] Training TCN Model...")
+        stage_start = time.time()
         tcn_train_preds = self._train_keras_model(
-            self.tcn_model, X_train_windowed, y_train_windowed
+            self.tcn_model, X_train_windowed, y_train_windowed, model_name="TCN"
         )
-        
+        stage_time = time.time() - stage_start
+        print(f"TCN training completed in {stage_time:.1f}s")
+        main_pbar.update(1)
+
+        # Stage 2: Transformer Training
+        print(f"\n[2/4] Training Transformer Model...")
+        stage_start = time.time()
         transformer_train_preds = self._train_keras_model(
-            self.transformer_model, X_train_windowed, y_train_windowed
-            )
-        
-        xgb_train_preds = self._train_sklearn_model(
-            self.xgb_model, X_train_windowed, y_train_windowed
+            self.transformer_model, X_train_windowed, y_train_windowed, model_name="Transformer"
         )
-        
+        stage_time = time.time() - stage_start
+        print(f"Transformer training completed in {stage_time:.1f}s")
+        main_pbar.update(1)
+
+        # Stage 3: XGBoost Training
+        print(f"\n[3/4] Training XGBoost Model...")
+        stage_start = time.time()
+        xgb_train_preds = self._train_sklearn_model(
+            self.xgb_model, X_train_windowed, y_train_windowed, model_name="XGBoost"
+        )
+        stage_time = time.time() - stage_start
+        print(f"XGBoost training completed in {stage_time:.1f}s")
+        main_pbar.update(1)
+
+        # Stage 4: Meta-Classifier Training
+        print(f"\n[4/4] Training Meta-Classifier...")
+        stage_start = time.time()
+
         # Create meta-features
         train_meta_features = np.column_stack((
             tcn_train_preds, transformer_train_preds, xgb_train_preds
         ))
-        
+
         # Initialize and train meta-classifier
         if self.meta_classifier == 'rf':
             self.meta_model = RandomForestClassifier(
@@ -304,11 +396,22 @@ class EthereumPricePredictionModel:
             )
         elif self.meta_classifier == 'xgb':
             self.meta_model = XGBClassifier(
-                n_estimators=50, max_depth=3, learning_rate=0.1, 
+                n_estimators=50, max_depth=3, learning_rate=0.1,
                 random_state=self.random_seed
             )
-        
+
         self.meta_model.fit(train_meta_features, y_train_windowed)
+        stage_time = time.time() - stage_start
+        print(f"Meta-classifier training completed in {stage_time:.1f}s")
+        main_pbar.update(1)
+
+        main_pbar.close()
+        total_time = time.time() - training_start_time
+
+        print("\n" + "="*60)
+        print(f"TRAINING COMPLETED IN {total_time:.1f}s")
+        print("="*60)
+
         self.is_trained = True
         
     
@@ -324,11 +427,23 @@ class EthereumPricePredictionModel:
         """
         if not self.is_trained:
             raise ValueError("Model must be trained before making predictions")
-        
+
+        # Ensure numeric dtype and handle NaN values
+        X_data = np.asarray(X_data, dtype=np.float32)
+        X_data = np.nan_to_num(X_data, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Prepare data for deep learning models (TCN/Transformer need 3D input)
+        num_features = len(self.feature_columns)
+        actual_window_length = 10  # Based on t-0 to t-9 pattern
+        features_per_timestep = num_features // actual_window_length
+
+        # Reshape for windowed models
+        X_windowed = X_data.reshape(X_data.shape[0], actual_window_length, features_per_timestep)
+
         # Get base model predictions
-        tcn_preds = np.argmax(self.tcn_model.predict(X_data, verbose=0), axis=1)
+        tcn_preds = np.argmax(self.tcn_model.predict(X_windowed, verbose=0), axis=1)
         transformer_preds = np.argmax(
-            self.transformer_model.predict(X_data, verbose=0), axis=1
+            self.transformer_model.predict(X_windowed, verbose=0), axis=1
         )
         xgb_preds = self.xgb_model.predict(X_data.reshape(len(X_data), -1))
         
@@ -351,9 +466,6 @@ class EthereumPricePredictionModel:
         """
         if self.evaluation_data is None:
             raise ValueError("No evaluation data available. Set self.evaluation_data first.")
-
-        if not self.is_trained:
-            raise ValueError("Model must be trained before evaluation")
 
         # Extract features and labels from evaluation data
         label_col = 'label'
