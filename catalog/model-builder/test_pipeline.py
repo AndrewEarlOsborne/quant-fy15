@@ -1,4 +1,5 @@
-from data_engineering import engineer_features, show_label_distribution, DataConfig
+'''Test pipeline for data engineering and model training/evaluation.'''
+from data_engineering import DataConfig
 import pandas as pd
 from model_builder import ModelBuilder
 import os
@@ -25,7 +26,7 @@ config = DataConfig(
 
 # Train model
 model_builder.load_data(os.path.join(cleaned_data_dir, 'cleaned_data.csv'), 0.2)
-model_builder.train()
+# model_builder.train()
 
 # Evaluate current model
 model_builder.evaluate()

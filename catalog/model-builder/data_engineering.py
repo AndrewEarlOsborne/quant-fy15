@@ -58,35 +58,52 @@ def engineer_features(config: DataConfig) -> DataFrame:
     # Sort by date to maintain temporal order
     labeled_data.sort_values(by='date', inplace=True)
 
-    # Get feature columns (excluding metadata and target)
-    sensitive_cols = ['interval_start', 'close_price', 'label', 'delta']
-    feature_columns = [col for col in labeled_data.columns if col not in sensitive_cols]
+    # Define which features should be windowed
+    windowed_features = ['delta', 'volume']
 
-    # Create windowed features
-    X = labeled_data[feature_columns].values
+    # Get feature columns (excluding metadata and target)
+    sensitive_cols = ['interval_start', 'close_price', 'label']
+
+    # Separate windowed and non-windowed features
+    windowed_cols = [col for col in windowed_features if col in labeled_data.columns]
+    non_windowed_cols = [col for col in labeled_data.columns
+                        if col not in sensitive_cols and col not in windowed_features]
+
     y = labeled_data['label'].astype(int).values
 
-    X_windowed = _create_windows(X, config.window_length)
+    # Create windowed features only for selected columns
+    X_windowed_data = labeled_data[windowed_cols].values
+    X_windowed = _create_windows(X_windowed_data, config.window_length)
     y_windowed = y[config.window_length-1:]
 
+    # Get non-windowed features for the same time period
+    X_non_windowed = labeled_data[non_windowed_cols].iloc[config.window_length-1:].values
+
     # date based balancing # TODO
-    min_samples = min(len(X_windowed), len(y_windowed))
+    min_samples = min(len(X_windowed), len(y_windowed), len(X_non_windowed))
     X_windowed = X_windowed[:min_samples]
+    X_non_windowed = X_non_windowed[:min_samples]
     y_windowed = y_windowed[:min_samples]
 
-    # Create DataFrame with windowed features
+    # Create column names for windowed features
     window_length = config.window_length
-
     windowed_columns = []
     for i in range(window_length):
-        for j, feature in enumerate(feature_columns):
+        for feature in windowed_cols:
             windowed_columns.append(f"{feature}_t-{window_length-1-i}")
 
-    # Reshape windowed data to 2D
-    X_flattened = X_windowed.reshape(X_windowed.shape[0], -1)
+    # Reshape windowed data to 2D and combine with non-windowed features
+    X_windowed_flattened = X_windowed.reshape(X_windowed.shape[0], -1)
+
+    # Combine windowed and non-windowed features
+    all_columns = windowed_columns + non_windowed_cols
+    if len(X_non_windowed) > 0:
+        X_combined = np.hstack([X_windowed_flattened, X_non_windowed])
+    else:
+        X_combined = X_windowed_flattened
 
     # Create final DataFrame
-    result_df = pd.DataFrame(X_flattened, columns=windowed_columns)
+    result_df = pd.DataFrame(X_combined, columns=all_columns)
     result_df['label'] = y_windowed
 
     # Add metadata columns for the last timestamp (most recent)
@@ -291,6 +308,37 @@ def show_label_distribution(data:DataFrame):
     for label in unique_labels:
         label_count = len(df[df['label'] == label])
         print(f"Label {label}: {label_count} samples ({label_count/len(df)*100:.1f}%)")
+
+def check_investment(label):
+    """
+    Calculate if an investment should be made based on the label classification.
+
+    Args:
+        label (int): The predicted label from the model
+
+    Returns:
+        bool: True if investment should be made, False otherwise
+
+    Logic:
+        - If label < num_labels//2: return False (don't invest)
+        - If label > num_labels//2: return True (invest)
+        - If label == num_labels//2 (median for odd num_labels):
+          use STRATEGY_MEDIAN_LABEL_INVESTMENT from .env
+    """
+    # Get number of labels from environment variable
+    num_labels = int(os.getenv('MODEL_NUM_CATEGORIES', '3'))
+
+    # Calculate threshold (midpoint)
+    threshold = num_labels // 2
+
+    if label < threshold:
+        return False
+    elif label > threshold:
+        return True
+    else:
+        # Handle median case for odd number of labels
+        median_investment = os.getenv('STRATEGY_MEDIAN_LABEL_INVESTMENT', 'false').lower()
+        return median_investment == 'true'
 
 def _create_windows(data, window_length):
     """Create sliding windows for time series modeling"""

@@ -103,8 +103,8 @@ class ModelBuilder():
             raise ValueError("No evaluation data available. Load data first.")
 
         # Set evaluation data in the model and evaluate
-        self.model.evaluation_data = self.evaluation_data
-        results = self.model.evaluate()
+        
+        results = self.model.evaluate(self.evaluation_data)
 
         print(f"Test Accuracy: {results['accuracy']:.4f}")
         print(f"Test F1 Score (Weighted): {results['f1_score_weighted']:.4f}")

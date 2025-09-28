@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from tqdm import tqdm
 
 
-from tensorflow.keras.models import Model, load_model
+from keras.models import Model, load_model
 from keras.layers import Input, Dense, Dropout, BatchNormalization, Conv1D, Add, Activation, GlobalAveragePooling1D, MultiHeadAttention, LayerNormalization
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from keras.optimizers import AdamW
@@ -40,7 +40,6 @@ class TqdmCallback(tf.keras.callbacks.Callback):
             total=self.params['epochs'],
             desc=f"{self.model_name} - Fold {self.fold_num}/{self.total_folds}",
             leave=False,
-            position=1
         )
 
     def on_epoch_end(self, epoch, logs=None):
@@ -59,7 +58,7 @@ class TqdmCallback(tf.keras.callbacks.Callback):
 from tscv import *
 
 
-def get_historical_prices(start_date, end_date, interval='1d'):
+def get_historical_prices(start_date, end_date, interval='1h'):
     """
     Load historical ETH-USD price data from local CSV and return price changes.
 
@@ -155,61 +154,125 @@ class EthereumPricePredictionModel:
         self.is_trained = False
         self.evaluation_data: pd.DataFrame = None
         
-    def _build_tcn_model(self, input_features):
-        """Build Temporal Convolutional Network"""
+    def _build_tcn_model(self, windowed_features, static_features):
+        """Build Temporal Convolutional Network with mixed inputs"""
         def residual_block(x, filters, kernel_size, dilation_rate, dropout_rate=0.3):
             prev_x = x
             if x.shape[-1] != filters:
-                prev_x = Conv1D(filters, kernel_size=1, padding='same', 
+                prev_x = Conv1D(filters, kernel_size=1, padding='same',
                                kernel_regularizer=l2(0.01))(prev_x)
-            
-            conv1 = Conv1D(filters, kernel_size, dilation_rate=dilation_rate, 
+
+            conv1 = Conv1D(filters, kernel_size, dilation_rate=dilation_rate,
                           padding='causal', kernel_regularizer=l2(0.01))(x)
             conv1 = BatchNormalization()(conv1)
             conv1 = Activation('relu')(conv1)
             conv1 = Dropout(dropout_rate)(conv1)
-            
-            conv2 = Conv1D(filters, kernel_size, dilation_rate=dilation_rate, 
+
+            conv2 = Conv1D(filters, kernel_size, dilation_rate=dilation_rate,
                           padding='causal', kernel_regularizer=l2(0.01))(conv1)
             conv2 = BatchNormalization()(conv2)
             conv2 = Activation('relu')(conv2)
             conv2 = Dropout(dropout_rate)(conv2)
-            
+
             out = Add()([prev_x, conv2])
             out = Activation('relu')(out)
             return out
-        
-        inputs = Input(shape=(10, input_features))
-        x = inputs
-        
-        for d in [1, 2]:
-            x = residual_block(x, filters=16, kernel_size=3, dilation_rate=d)
-        
-        x = GlobalAveragePooling1D()(x)
-        outputs = Dense(self.num_classes, activation='softmax', 
+
+        # Windowed input branch (time series)
+        if windowed_features > 0:
+            windowed_input = Input(shape=(10, windowed_features), name='windowed_input')
+            x = windowed_input
+
+            for d in [1, 2]:
+                x = residual_block(x, filters=16, kernel_size=3, dilation_rate=d)
+
+            x = GlobalAveragePooling1D()(x)
+            windowed_branch = x
+        else:
+            windowed_input = None
+            windowed_branch = None
+
+        # Static input branch
+        if static_features > 0:
+            static_input = Input(shape=(static_features,), name='static_input')
+            static_branch = Dense(32, activation='relu', kernel_regularizer=l2(0.01))(static_input)
+            static_branch = Dropout(0.3)(static_branch)
+        else:
+            static_input = None
+            static_branch = None
+
+        # Combine branches
+        if windowed_branch is not None and static_branch is not None:
+            combined = tf.keras.layers.concatenate([windowed_branch, static_branch])
+            inputs = [windowed_input, static_input]
+        elif windowed_branch is not None:
+            combined = windowed_branch
+            inputs = windowed_input
+        elif static_branch is not None:
+            combined = static_branch
+            inputs = static_input
+        else:
+            raise ValueError("At least one input type (windowed or static) must be present")
+
+        # Final classification layers
+        x = Dense(64, activation='relu', kernel_regularizer=l2(0.01))(combined)
+        x = Dropout(0.3)(x)
+        outputs = Dense(self.num_classes, activation='softmax',
                        kernel_regularizer=l2(0.01))(x)
-        
+
         return Model(inputs, outputs, name="TCN")
     
-    def _build_transformer_model(self, input_features):
-        """Build Transformer model"""
-        inputs = Input(shape=(10, input_features))
-        x = inputs
-        
-        attn_output = MultiHeadAttention(num_heads=2, key_dim=16)(x, x)
-        x = LayerNormalization(epsilon=1e-6)(x + attn_output)
-        
-        ffn = Dense(32, activation='relu', kernel_regularizer=l2(0.01))(x)
-        ffn = Dense(input_features, kernel_regularizer=l2(0.01))(ffn)
-        x = LayerNormalization(epsilon=1e-6)(x + ffn)
-        
-        x = GlobalAveragePooling1D()(x)
-        outputs = Dense(self.num_classes, activation='softmax', 
+    def _build_transformer_model(self, windowed_features, static_features):
+        """Build Transformer model with mixed inputs"""
+        # Windowed input branch (time series)
+        if windowed_features > 0:
+            windowed_input = Input(shape=(10, windowed_features), name='windowed_input')
+            x = windowed_input
+
+            attn_output = MultiHeadAttention(num_heads=2, key_dim=16)(x, x)
+            x = LayerNormalization(epsilon=1e-6)(x + attn_output)
+
+            ffn = Dense(32, activation='relu', kernel_regularizer=l2(0.01))(x)
+            ffn = Dense(windowed_features, kernel_regularizer=l2(0.01))(ffn)
+            x = LayerNormalization(epsilon=1e-6)(x + ffn)
+
+            x = GlobalAveragePooling1D()(x)
+            windowed_branch = x
+        else:
+            windowed_input = None
+            windowed_branch = None
+
+        # Static input branch
+        if static_features > 0:
+            static_input = Input(shape=(static_features,), name='static_input')
+            static_branch = Dense(32, activation='relu', kernel_regularizer=l2(0.01))(static_input)
+            static_branch = Dropout(0.3)(static_branch)
+        else:
+            static_input = None
+            static_branch = None
+
+        # Combine branches
+        if windowed_branch is not None and static_branch is not None:
+            combined = tf.keras.layers.concatenate([windowed_branch, static_branch])
+            inputs = [windowed_input, static_input]
+        elif windowed_branch is not None:
+            combined = windowed_branch
+            inputs = windowed_input
+        elif static_branch is not None:
+            combined = static_branch
+            inputs = static_input
+        else:
+            raise ValueError("At least one input type (windowed or static) must be present")
+
+        # Final classification layers
+        x = Dense(64, activation='relu', kernel_regularizer=l2(0.01))(combined)
+        x = Dropout(0.3)(x)
+        outputs = Dense(self.num_classes, activation='softmax',
                        kernel_regularizer=l2(0.01))(x)
-        
+
         return Model(inputs, outputs, name="Transformer")
     
-    def _train_keras_model(self, model, X_train, y_train,
+    def _train_keras_model(self, model, X_windowed, X_static, y_train,
                           epochs=100, batch_size=64, model_name="Model"):
         """Train Keras model with time series cross-validation"""
         train_preds = np.zeros(len(y_train))
@@ -218,17 +281,29 @@ class EthereumPricePredictionModel:
         tscv = TimeSeriesSplit(n_splits = self.num_classes)
         total_folds = self.num_classes
 
-        for fold_idx, (train_idx, val_idx) in enumerate(tscv.split(X_train)):
+        for fold_idx, (train_idx, val_idx) in enumerate(tscv.split(X_windowed)):
             fold_num = fold_idx + 1
             fold_start_time = time.time()
 
-            X_tr, X_val = X_train[train_idx], X_train[val_idx]
+            # Prepare data based on model input structure
+            if hasattr(model, 'input_names') and len(model.input_names) > 1:
+                # Multi-input model
+                X_tr = [X_windowed[train_idx], X_static[train_idx]]
+                X_val = [X_windowed[val_idx], X_static[val_idx]]
+            elif self.num_windowed_features > 0:
+                # Windowed input only
+                X_tr = X_windowed[train_idx]
+                X_val = X_windowed[val_idx]
+            else:
+                # Static input only
+                X_tr = X_static[train_idx]
+                X_val = X_static[val_idx]
+
             y_tr, y_val = y_train[train_idx], y_train[val_idx]
 
             model_fold = tf.keras.models.clone_model(model)
             model_fold.compile(
                 optimizer=AdamW(learning_rate=0.0005),
-                ## Advantageous for one-hot encoding rather than proportional/vector envoded results
                 loss='sparse_categorical_crossentropy',
                 metrics=['accuracy']
             )
@@ -257,9 +332,9 @@ class EthereumPricePredictionModel:
 
             fold_time = time.time() - fold_start_time
             print(f"    Fold {fold_num} completed in {fold_time:.1f}s")
-            
+
             train_preds[val_idx] = np.argmax(model_fold.predict(X_val, verbose=0), axis=1)
-        
+
         return train_preds
     
     def _train_sklearn_model(self, model, X, y, model_name="Sklearn Model"):
@@ -271,7 +346,7 @@ class EthereumPricePredictionModel:
         total_folds = self.num_classes
 
         fold_pbar = tqdm(enumerate(tscv.split(X)), total=total_folds,
-                         desc=f"{model_name} Training", leave=False, position=1)
+                         desc=f"{model_name} Training", leave=False)
 
         for fold_idx, (train_idx, val_idx) in fold_pbar:
             fold_num = fold_idx + 1
@@ -307,29 +382,52 @@ class EthereumPricePredictionModel:
         # Automatically determine feature columns if not set
         if self.feature_columns is None:
             exclude_cols = ['label', 'interval_start', 'close_price', 'delta', 'date', 'Unnamed: 0']
-            # Also exclude date/time columns that contain strings
-            exclude_patterns = ['interval_end_x', 'interval_end_y', 'date_t-']
-            self.feature_columns = [col for col in data.columns
-                                  if col not in exclude_cols and
-                                  not any(pattern in col for pattern in exclude_patterns)]
+            self.feature_columns = [col for col in data.columns if col not in exclude_cols]
 
-        X_train_windowed = data[self.feature_columns].values
-        y_train_windowed = data['label'].values
-
-        # Reshape data for time series models
-        # Data is already windowed with timestep suffixes (t-0, t-1, ..., t-9)
-        num_features = len(self.feature_columns)
-
-        # The actual window length is determined by the data structure (10 timesteps)
+        # Separate windowed and non-windowed features based on data structure
+        windowed_features = ['delta', 'volume']  # Features that should be windowed
         actual_window_length = 10  # Based on t-0 to t-9 pattern
-        features_per_timestep = num_features // actual_window_length
 
-        X_train_windowed = X_train_windowed.reshape(X_train_windowed.shape[0], actual_window_length, features_per_timestep)
+        # Identify windowed columns (those with timestep suffixes)
+        windowed_columns = []
+        static_columns = []
+
+        for col in self.feature_columns:
+            is_windowed = any(f"{feature}_t-" in col for feature in windowed_features)
+            if is_windowed:
+                windowed_columns.append(col)
+            else:
+                static_columns.append(col)
+
+        print(f"Windowed features: {len(windowed_columns)} columns")
+        print(f"Static features: {len(static_columns)} columns")
+
+        # Extract windowed and static data
+        if windowed_columns:
+            X_windowed = data[windowed_columns].values
+            # Reshape windowed features: (samples, window_length, num_windowed_features)
+            num_windowed_features = len(windowed_features)
+            X_windowed = X_windowed.reshape(X_windowed.shape[0], actual_window_length, num_windowed_features)
+        else:
+            X_windowed = np.empty((len(data), actual_window_length, 0))
+
+        if static_columns:
+            X_static = data[static_columns].values
+        else:
+            X_static = np.empty((len(data), 0))
+
+        y_train = data['label'].values
+
+        # Store feature structure for later use
+        self.windowed_columns = windowed_columns
+        self.static_columns = static_columns
+        self.num_windowed_features = len(windowed_features) if windowed_columns else 0
+        self.num_static_features = len(static_columns)
 
         # Initialize models
         print("Initializing models...")
-        self.tcn_model = self._build_tcn_model(features_per_timestep)
-        self.transformer_model = self._build_transformer_model(features_per_timestep)
+        self.tcn_model = self._build_tcn_model(self.num_windowed_features, self.num_static_features)
+        self.transformer_model = self._build_transformer_model(self.num_windowed_features, self.num_static_features)
         self.xgb_model = XGBClassifier(
             n_estimators=100, max_depth=5, learning_rate=0.2,
             random_state=self.random_seed
@@ -350,7 +448,7 @@ class EthereumPricePredictionModel:
         print(f"\n[1/4] Training TCN Model...")
         stage_start = time.time()
         tcn_train_preds = self._train_keras_model(
-            self.tcn_model, X_train_windowed, y_train_windowed, model_name="TCN"
+            self.tcn_model, X_windowed, X_static, y_train, model_name="TCN"
         )
         stage_time = time.time() - stage_start
         print(f"TCN training completed in {stage_time:.1f}s")
@@ -360,7 +458,7 @@ class EthereumPricePredictionModel:
         print(f"\n[2/4] Training Transformer Model...")
         stage_start = time.time()
         transformer_train_preds = self._train_keras_model(
-            self.transformer_model, X_train_windowed, y_train_windowed, model_name="Transformer"
+            self.transformer_model, X_windowed, X_static, y_train, model_name="Transformer"
         )
         stage_time = time.time() - stage_start
         print(f"Transformer training completed in {stage_time:.1f}s")
@@ -369,8 +467,10 @@ class EthereumPricePredictionModel:
         # Stage 3: XGBoost Training
         print(f"\n[3/4] Training XGBoost Model...")
         stage_start = time.time()
+        # For XGBoost, flatten all features
+        X_combined = np.concatenate([X_windowed.reshape(len(X_windowed), -1), X_static], axis=1)
         xgb_train_preds = self._train_sklearn_model(
-            self.xgb_model, X_train_windowed, y_train_windowed, model_name="XGBoost"
+            self.xgb_model, X_combined, y_train, model_name="XGBoost"
         )
         stage_time = time.time() - stage_start
         print(f"XGBoost training completed in {stage_time:.1f}s")
@@ -400,7 +500,7 @@ class EthereumPricePredictionModel:
                 random_state=self.random_seed
             )
 
-        self.meta_model.fit(train_meta_features, y_train_windowed)
+        self.meta_model.fit(train_meta_features, y_train)
         stage_time = time.time() - stage_start
         print(f"Meta-classifier training completed in {stage_time:.1f}s")
         main_pbar.update(1)
@@ -418,42 +518,84 @@ class EthereumPricePredictionModel:
     def predict(self, X_data):
         """
         Make predictions on new data.
-        
+
         Args:
-            X_data (np.ndarray): Input data (windowed)
-            
+            X_data (pd.DataFrame or np.ndarray): Input data
+
         Returns:
             np.ndarray: Predictions
         """
         if not self.is_trained:
             raise ValueError("Model must be trained before making predictions")
 
-        # Ensure numeric dtype and handle NaN values
-        X_data = np.asarray(X_data, dtype=np.float32)
-        X_data = np.nan_to_num(X_data, nan=0.0, posinf=0.0, neginf=0.0)
+        # Convert to DataFrame if numpy array is passed
+        if isinstance(X_data, np.ndarray):
+            X_data = pd.DataFrame(X_data, columns=self.feature_columns)
 
-        # Prepare data for deep learning models (TCN/Transformer need 3D input)
-        num_features = len(self.feature_columns)
-        actual_window_length = 10  # Based on t-0 to t-9 pattern
-        features_per_timestep = num_features // actual_window_length
+        # Select only the feature columns to ensure consistency
+        X_data = X_data[self.feature_columns]
 
-        # Reshape for windowed models
-        X_windowed = X_data.reshape(X_data.shape[0], actual_window_length, features_per_timestep)
+        # Ensure numeric dtype and handle NaN values using pandas
+        X_data = X_data.apply(pd.to_numeric, errors='coerce').fillna(0.0).astype('float32')
+
+        # Separate windowed and static features
+        if hasattr(self, 'windowed_columns') and hasattr(self, 'static_columns'):
+            windowed_columns = self.windowed_columns
+            static_columns = self.static_columns
+            num_windowed_features = getattr(self, 'num_windowed_features', 0)
+            num_static_features = getattr(self, 'num_static_features', 0)
+        else:
+            # Fallback for models trained before refactor
+            windowed_features = ['delta', 'volume']
+            windowed_columns = []
+            static_columns = []
+            for col in self.feature_columns:
+                is_windowed = any(f"{feature}_t-" in col for feature in windowed_features)
+                if is_windowed:
+                    windowed_columns.append(col)
+                else:
+                    static_columns.append(col)
+
+            num_windowed_features = len(windowed_features) if windowed_columns else 0
+            num_static_features = len(static_columns)
+
+        # Extract windowed and static data
+        if windowed_columns:
+            X_windowed = X_data[windowed_columns].values
+            X_windowed = X_windowed.reshape(X_windowed.shape[0], 10, num_windowed_features)
+        else:
+            X_windowed = np.empty((len(X_data), 10, 0))
+
+        if static_columns:
+            X_static = X_data[static_columns].values
+        else:
+            X_static = np.empty((len(X_data), 0))
+
+        # Prepare inputs for models
+        if num_windowed_features > 0 and num_static_features > 0:
+            model_inputs = [X_windowed, X_static]
+        elif num_windowed_features > 0:
+            model_inputs = X_windowed
+        else:
+            model_inputs = X_static
 
         # Get base model predictions
-        tcn_preds = np.argmax(self.tcn_model.predict(X_windowed, verbose=0), axis=1)
+        tcn_preds = np.argmax(self.tcn_model.predict(model_inputs, verbose=0), axis=1)
         transformer_preds = np.argmax(
-            self.transformer_model.predict(X_windowed, verbose=0), axis=1
+            self.transformer_model.predict(model_inputs, verbose=0), axis=1
         )
-        xgb_preds = self.xgb_model.predict(X_data.reshape(len(X_data), -1))
-        
+
+        # For XGBoost, flatten all features
+        X_combined = np.concatenate([X_windowed.reshape(len(X_windowed), -1), X_static], axis=1)
+        xgb_preds = self.xgb_model.predict(X_combined)
+
         # Create meta-features and predict
         meta_features = np.column_stack((tcn_preds, transformer_preds, xgb_preds))
         final_predictions = self.meta_model.predict(meta_features)
-        
+
         return final_predictions
     
-    def evaluate(self, do_plots=True):
+    def evaluate(self, data:pd.DataFrame, do_plots=True):
         """
         Evaluate model performance using self.evaluation_data.
         Calculates classification accuracy, creates visualizations, and performs backtesting.
@@ -464,18 +606,17 @@ class EthereumPricePredictionModel:
         Returns:
             dict: Comprehensive evaluation metrics
         """
-        if self.evaluation_data is None:
-            raise ValueError("No evaluation data available. Set self.evaluation_data first.")
-
         # Extract features and labels from evaluation data
-        label_col = 'label'
-        feature_cols = [col for col in self.evaluation_data.columns if col != label_col]
+        label_cols = ['label']
+        feature_cols = [col for col in data.columns if col not in label_cols]
 
-        X = self.evaluation_data[feature_cols]
-        y = self.evaluation_data[label_col]
+        print(feature_cols)
 
-        # Generate predictions
-        predictions = self.predict(X.values)
+        X = data[feature_cols]
+        y = data['label']
+
+        # Generate predictions - pass DataFrame directly
+        predictions = self.predict(X)
 
         # Calculate classification metrics
         accuracy = accuracy_score(y, predictions)
@@ -489,8 +630,8 @@ class EthereumPricePredictionModel:
         class_report = classification_report(y, predictions, output_dict=True)
 
         if do_plots:
-            # Create seaborn confusion matrix heatmap
-            plt.figure(figsize=(10, 8))
+            # Create plots with specified requirements
+            plt.figure(figsize=(12, 8))
 
             # Plot confusion matrix
             plt.subplot(2, 2, 1)
@@ -509,35 +650,17 @@ class EthereumPricePredictionModel:
             plt.xlabel('Predicted Class')
             plt.ylabel('Count')
 
-            # Plot actual vs predicted
-            plt.subplot(2, 2, 3)
-            plt.scatter(y, predictions, alpha=0.6)
-            plt.plot([y.min(), y.max()], [y.min(), y.max()], 'r--', lw=2)
-            plt.xlabel('True Label')
-            plt.ylabel('Predicted Label')
-            plt.title('True vs Predicted Labels')
-
-            # Plot class-wise accuracy
-            plt.subplot(2, 2, 4)
-            class_accuracies = []
-            for i in range(self.num_classes):
-                if str(i) in class_report:
-                    class_accuracies.append(class_report[str(i)]['f1-score'])
-                else:
-                    class_accuracies.append(0)
-
-            plt.bar(range(self.num_classes), class_accuracies, alpha=0.7, color='lightgreen')
-            plt.title('Class-wise F1 Scores')
-            plt.xlabel('Class')
-            plt.ylabel('F1 Score')
-            plt.xticks(range(self.num_classes))
-
             plt.tight_layout()
             plt.show()
 
         # Backtesting analysis
-        backtest_results = self.calculate_backtest_returns(
-            predictions, y, plot_results=do_plots
+        predictions_df = pd.DataFrame({
+            'interval_start': data.get('interval_start', pd.date_range(start='2024-01-01', periods=len(predictions), freq='1H')),
+            'label': predictions
+        })
+
+        model_return, benchmark_return = self.display_backtesting_results(
+            predictions_df, y, plot_results=do_plots
         )
 
         # Compile comprehensive results
@@ -549,7 +672,8 @@ class EthereumPricePredictionModel:
             'classification_report': class_report,
             'predictions': predictions,
             'y_true': y.values,
-            'backtest_results': backtest_results
+            'model_return': model_return,
+            'backtest_return': benchmark_return
         }
 
         # Print summary
@@ -557,185 +681,86 @@ class EthereumPricePredictionModel:
         print(f"Accuracy: {accuracy:.4f}")
         print(f"F1 Score (Weighted): {f1_weighted:.4f}")
         print(f"F1 Score (Macro): {f1_macro:.4f}")
-        print(f"Backtest Return: {backtest_results.get('model_return', 0):.2f}%")
-        print(f"Benchmark Return: {backtest_results.get('benchmark_return', 0):.2f}%")
+        print(f"Backtest Return: {model_return:.2f}%")
+        print(f"Benchmark Return: {benchmark_return:.2f}%")
 
         return results
     
-    def calculate_backtest_returns(self, predictions, y_true, plot_results=False):
+    def display_backtesting_results(self, predictions_df, y_true, plot_results=False):
         """
         Calculate returns from trading strategy based on predictions.
 
         Args:
-            predictions (np.ndarray): Model predictions
+            predictions_df (pd.DataFrame): DataFrame with 'interval_start' and 'label' columns
             y_true (pd.Series): True labels for backtesting validation
             plot_results (bool): Whether to plot the results
-
-        Returns:
-            dict: Backtesting results and metrics
         """
-        # Try to get dates from evaluation data for historical price fetching
-        if hasattr(self.evaluation_data, 'date') and 'date' in self.evaluation_data.columns:
-            dates = pd.to_datetime(self.evaluation_data['date'])
-            start_date = dates.min()
-            end_date = dates.max()
-        else:
-            # Default to recent dates if no date column available
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=len(predictions))
+        backtesting_df = self.calculate_historical_backtesting(predictions_df)
 
-        # Fetch historical price changes
-        try:
-            price_deltas = get_historical_prices(start_date, end_date, interval='1d')
-
-            # Ensure we have enough price data
-            if len(price_deltas) < len(predictions):
-                print(f"Warning: Limited price data ({len(price_deltas)} vs {len(predictions)} predictions)")
-                # Pad with zeros if needed
-                price_deltas = np.pad(price_deltas, (0, len(predictions) - len(price_deltas)), 'constant')
-            elif len(price_deltas) > len(predictions):
-                # Trim excess price data
-                price_deltas = price_deltas[:len(predictions)]
-
-        except Exception as e:
-            print(f"Warning: Could not fetch price data, using synthetic returns: {e}")
-            # Generate synthetic price changes as fallback
-            np.random.seed(42)
-            price_deltas = np.random.normal(0.001, 0.02, len(predictions))
-
-        model_history = [1.0]
-        benchmark_history = [1.0]
-        positions = []
-
-        # Calculate cumulative returns
-        for i in range(len(predictions)):
-            if i >= len(price_deltas) or np.isnan(price_deltas[i]):
-                # No trade if no price data
-                benchmark_history.append(benchmark_history[-1])
-                model_history.append(model_history[-1])
-                positions.append(0)
-                continue
-
-            # Benchmark (buy and hold) return
-            benchmark_history.append(benchmark_history[-1] * (1 + price_deltas[i]))
-
-            # Model strategy: trade based on predictions
-            # For 3-class system: 0=sell/short, 1=hold, 2=buy
-            # Get risk management rate from environment variable
-            max_loss_rate = float(os.getenv('STRATEGY_STOP_LOSS_RATE', '0.05'))
-
-            if self.num_classes == 3:
-                if predictions[i] == 2:  # Buy signal
-                    # Limit losses using environment variable
-                    capped_return = max(price_deltas[i], -max_loss_rate)
-                    capital_change = model_history[-1] * capped_return * self.investment_rate
-                    model_history.append(model_history[-1] + capital_change)
-                    positions.append(1)
-                elif predictions[i] == 0:  # Sell signal (inverse position)
-                    # Short position - profit when price goes down
-                    capped_return = max(-price_deltas[i], -max_loss_rate)
-                    capital_change = model_history[-1] * capped_return * self.investment_rate
-                    model_history.append(model_history[-1] + capital_change)
-                    positions.append(-1)
-                else:  # Hold
-                    model_history.append(model_history[-1])
-                    positions.append(0)
-            else:
-                # Generic approach for any number of classes
-                if predictions[i] > (self.num_classes - 1) // 2:
-                    # Upper half of classes = buy signal
-                    capped_return = max(price_deltas[i], -max_loss_rate)
-                    capital_change = model_history[-1] * capped_return * self.investment_rate
-                    model_history.append(model_history[-1] + capital_change)
-                    positions.append(1)
-                else:
-                    model_history.append(model_history[-1])
-                    positions.append(0)
+        model_capital = backtesting_df['capital'].values
+        benchmark_capital = backtesting_df['benchmark'].values
+        did_invest = backtesting_df['did_invest'].values
 
         # Calculate performance metrics
-        total_return = (model_history[-1] - 1) * 100
-        benchmark_return = (benchmark_history[-1] - 1) * 100
+        final_model_return = (model_capital[-1] - 1) * 100
+        final_benchmark_return = (benchmark_capital[-1] - 1) * 100
 
         # Calculate additional metrics
-        daily_returns = np.diff(model_history) / np.array(model_history[:-1])
-        benchmark_daily_returns = np.diff(benchmark_history) / np.array(benchmark_history[:-1])
+        interval_returns = np.diff(model_capital) / np.array(model_capital[:-1])
+        benchmark_interval_returns = np.diff(benchmark_capital) / np.array(benchmark_capital[:-1])
 
-        avg_daily_return = np.mean(daily_returns) * 100
-        volatility = np.std(daily_returns) * 100
-        sharpe_ratio = avg_daily_return / volatility if volatility > 0 else 0
+        avg_interval_return = np.mean(interval_returns) * 100
+        volatility = np.std(interval_returns) * 100
+        sharpe_ratio = avg_interval_return / volatility if volatility > 0 else 0
 
         # Calculate maximum drawdown
-        peak = np.maximum.accumulate(model_history)
-        drawdown = (np.array(model_history) - peak) / peak
+        peak = np.maximum.accumulate(model_capital)
+        drawdown = (np.array(model_capital) - peak) / peak
         max_drawdown = np.min(drawdown) * 100
 
-        percent_days_invested = (np.sum(np.array(positions) != 0) / len(positions)) * 100
-        win_rate = np.sum(np.array(daily_returns) > 0) / len(daily_returns) * 100
+        percent_days_invested = (np.sum(np.array(did_invest) != 0) / len(did_invest)) * 100
+        win_rate = np.sum(np.array(interval_returns) > 0) / len(interval_returns) * 100
 
         if plot_results:
-            plt.figure(figsize=(15, 10))
+            plt.figure(figsize=(12, 8))
 
-            # Main strategy comparison plot
-            plt.subplot(2, 2, 1)
-            plt.plot(model_history, label='Model Strategy', color='blue', linewidth=2)
-            plt.plot(benchmark_history, label='Buy & Hold', color='black',
+            # Main strategy comparison plot (Benchmark)
+            plt.subplot(2, 2, 3)
+            plt.plot(model_capital, label='Model Strategy', color='blue', linewidth=2)
+            plt.plot(benchmark_capital, label='Buy & Hold', color='black',
                     linestyle='--', linewidth=2)
-
-            # Highlight trading positions
-            for i, pos in enumerate(positions):
-                if pos == 1:  # Long position
-                    plt.axvspan(i, i + 1, color='green', alpha=0.3)
-                elif pos == -1:  # Short position
-                    plt.axvspan(i, i + 1, color='red', alpha=0.3)
-
             plt.title(f'Trading Strategy Performance\n'
-                     f'Model: {total_return:.2f}% | Benchmark: {benchmark_return:.2f}% | Sharpe: {sharpe_ratio:.2f}')
+                     f'Model: {final_model_return:.2f}% | Benchmark: {final_benchmark_return:.2f}% | Sharpe: {sharpe_ratio:.2f}')
             plt.xlabel('Trading Days')
             plt.ylabel('Portfolio Value')
             plt.grid(True, alpha=0.3)
             plt.legend()
 
-            # Daily returns histogram
-            plt.subplot(2, 2, 2)
-            plt.hist(daily_returns, bins=30, alpha=0.7, color='blue', label='Model')
-            plt.hist(benchmark_daily_returns, bins=30, alpha=0.7, color='gray', label='Benchmark')
-            plt.title('Daily Returns Distribution')
-            plt.xlabel('Daily Return')
-            plt.ylabel('Frequency')
-            plt.legend()
-
-            # Drawdown chart
-            plt.subplot(2, 2, 3)
-            plt.fill_between(range(len(drawdown)), drawdown * 100, alpha=0.7, color='red')
-            plt.title(f'Drawdown (Max: {max_drawdown:.2f}%)')
-            plt.xlabel('Trading Days')
-            plt.ylabel('Drawdown (%)')
-            plt.grid(True, alpha=0.3)
-
-            # Position distribution
+            # Benchmark for last month (30 days)
             plt.subplot(2, 2, 4)
-            pos_labels = ['Short', 'Hold', 'Long'] if self.num_classes == 3 else [f'Pos {i}' for i in set(positions)]
-            pos_counts = [positions.count(i) for i in sorted(set(positions))]
-            plt.pie(pos_counts, labels=pos_labels, autopct='%1.1f%%', startangle=90)
-            plt.title('Position Distribution')
+            last_month_days = min(30, len(model_capital))
+            last_month_model = model_capital[-last_month_days:]
+            last_month_benchmark = benchmark_capital[-last_month_days:]
+
+            plt.plot(range(last_month_days), last_month_model, label='Model Strategy', color='blue', linewidth=2)
+            plt.plot(range(last_month_days), last_month_benchmark, label='Buy & Hold', color='black',
+                    linestyle='--', linewidth=2)
+
+            # Calculate last month returns
+            last_month_model_return = ((last_month_model[-1] / last_month_model[0]) - 1) * 100 if len(last_month_model) > 0 else 0
+            last_month_benchmark_return = ((last_month_benchmark[-1] / last_month_benchmark[0]) - 1) * 100 if len(last_month_benchmark) > 0 else 0
+
+            plt.title(f'Last Month Performance\n'
+                     f'Model: {last_month_model_return:.2f}% | Benchmark: {last_month_benchmark_return:.2f}%')
+            plt.xlabel('Days (Last Month)')
+            plt.ylabel('Portfolio Value')
+            plt.grid(True, alpha=0.3)
+            plt.legend()
 
             plt.tight_layout()
             plt.show()
 
-        return {
-            'model_return': total_return,
-            'benchmark_return': benchmark_return,
-            'avg_daily_return': avg_daily_return,
-            'volatility': volatility,
-            'sharpe_ratio': sharpe_ratio,
-            'max_drawdown': max_drawdown,
-            'percent_days_invested': percent_days_invested,
-            'win_rate': win_rate,
-            'total_trades': np.sum(np.array(positions) != 0),
-            'model_history': model_history,
-            'benchmark_history': benchmark_history,
-            'positions': positions
-        }
+        return (final_model_return, final_benchmark_return)
     
     def save_model(self, filepath):
         """
@@ -846,3 +871,107 @@ class EthereumPricePredictionModel:
         model.is_trained = model_data['is_trained']
         
         return model
+    
+    def calculate_historical_backtesting(self, predictions_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calculate historical backtesting results with capital growth, benchmark performance, and investment decisions.
+
+        Args:
+            predictions_df (pd.DataFrame): DataFrame with 'interval_start' and 'label' columns
+                                         where label is in range [0, num_labels)
+
+        Returns:
+            pd.DataFrame: DataFrame with columns ['capital', 'benchmark', 'did_invest'] over time
+        """
+        if 'interval_start' not in predictions_df.columns or 'label' not in predictions_df.columns:
+            raise ValueError("predictions_df must contain 'interval_start' and 'label' columns")
+
+        predictions = predictions_df['label'].values
+        interval_starts = predictions_df['interval_start'].values
+
+        # Fetch historical price changes
+        try:
+            start_date = pd.to_datetime(predictions_df['interval_start'].min())
+            end_date = pd.to_datetime(predictions_df['interval_start'].max())
+            price_deltas = get_historical_prices(start_date, end_date, interval='1d')
+
+            # Ensure we have enough price data
+            if len(price_deltas) < len(predictions):
+                print(f"Warning: Limited price data ({len(price_deltas)} vs {len(predictions)} predictions)")
+                # Pad with zeros if needed
+                price_deltas = np.pad(price_deltas, (0, len(predictions) - len(price_deltas)), 'constant')
+            elif len(price_deltas) > len(predictions):
+                # Trim excess price data
+                price_deltas = price_deltas[:len(predictions)]
+
+        except Exception as e:
+            print(f"Warning: Could not fetch price data, using synthetic returns: {e}")
+            # Generate synthetic price changes as fallback
+            np.random.seed(42)
+            price_deltas = np.random.normal(0.001, 0.02, len(predictions))
+
+        # Initialize capital tracking
+        model_capital = [1.0]
+        benchmark_capital = [1.0]
+        did_invest = [0]  # 0=hold, 1=long, -1=short
+
+        # Get risk management parameters
+        max_loss_rate = float(os.getenv('STRATEGY_STOP_LOSS_RATE', '0.05'))
+
+        # Calculate cumulative returns
+        for i in range(len(predictions)):
+            # Benchmark (buy and hold) return
+            benchmark_capital.append(benchmark_capital[-1] * (1 + price_deltas[i]))
+
+            # Model strategy: trade based on predictions
+            # Determine investment decision based on prediction label
+            if self.num_classes == 3:
+                # For 3-class system: 0=sell/short, 1=hold, 2=buy
+                if predictions[i] == 2:  # Buy signal
+                    # Limit losses using environment variable
+                    capped_return = max(price_deltas[i], -max_loss_rate)
+                    capital_change = model_capital[-1] * capped_return * self.investment_rate
+                    model_capital.append(model_capital[-1] + capital_change)
+                    did_invest.append(1)
+                elif predictions[i] == 0:  # Sell signal (inverse position)
+                    # Short position - profit when price goes down
+                    capped_return = max(-price_deltas[i], -max_loss_rate)
+                    capital_change = model_capital[-1] * capped_return * self.investment_rate
+                    model_capital.append(model_capital[-1] + capital_change)
+                    did_invest.append(-1)
+                else:  # Hold (predictions[i] == 1)
+                    model_capital.append(model_capital[-1])
+                    did_invest.append(0)
+            else:
+                # Generic approach for any number of classes
+                # Upper half of classes = buy signal, lower half = hold/sell
+                mid_point = (self.num_classes - 1) // 2
+                if predictions[i] > mid_point:
+                    # Upper half of classes = buy signal
+                    capped_return = max(price_deltas[i], -max_loss_rate)
+                    capital_change = model_capital[-1] * capped_return * self.investment_rate
+                    model_capital.append(model_capital[-1] + capital_change)
+                    did_invest.append(1)
+                elif predictions[i] < mid_point:
+                    # Lower half of classes = sell signal (short)
+                    capped_return = max(-price_deltas[i], -max_loss_rate)
+                    capital_change = model_capital[-1] * capped_return * self.investment_rate
+                    model_capital.append(model_capital[-1] + capital_change)
+                    did_invest.append(-1)
+                else:
+                    # Middle class = hold
+                    model_capital.append(model_capital[-1])
+                    did_invest.append(0)
+
+        # Create result DataFrame with proper alignment
+        # Include initial state (t=0) and all prediction points
+        result_interval_starts = [interval_starts[0]] + list(interval_starts)
+
+        backtesting_df = pd.DataFrame({
+            'interval_start': result_interval_starts,
+            'capital': model_capital,
+            'benchmark': benchmark_capital,
+            'did_invest': did_invest
+        })
+
+        return backtesting_df
