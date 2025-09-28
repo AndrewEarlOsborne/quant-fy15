@@ -34,7 +34,6 @@ class ModelBuilder():
 
             
     def load_data(self, data_file: str, test_train_split: float = 0.0):
-
         data = pd.read_csv(data_file)
 
         # Convert date columns to datetime for comparison
@@ -86,6 +85,10 @@ class ModelBuilder():
 
     def train(self):
         if self.training_data is not None and not self.training_data.empty:
+            print("Training model")
+            print(f"Training: N = {len(self.training_data)}")
+            print(f"Training: Cols =  {self.training_data.columns.tolist()}")
+            
             self.model.train(self.training_data)
         else:
             raise ValueError("No loaded training data")

@@ -389,10 +389,14 @@ class EthereumPricePredictionModel:
 
         # Automatically determine feature columns if not set
         if self.feature_columns is None:
-            exclude_cols = ['label', 'interval_start', 'datetime', 'price', 'delta', 'date', 'interval_end', 'Unnamed: 0']
+            exclude_cols = ['label', 'delta', 'datetime']
             self.feature_columns = [col for col in data.columns if col not in exclude_cols]
 
-        print(f"Total features: {len(self.feature_columns)} columns")
+        if 'delta' in self.feature_columns or 'label' in self.feature_columns:
+            raise ValueError("Feature columns should not include 'delta' or 'label'")
+
+        print(f"=== Total features: {len(self.feature_columns)} columns ===")
+        print(f"Feature columns: {self.feature_columns}")
 
         # Extract all features as flat data
         X_data = data[self.feature_columns]
@@ -594,12 +598,9 @@ class EthereumPricePredictionModel:
             'label': predictions
         })
 
-        model_return, benchmark_return = self.display_backtesting_results(
-            predictions_df, y, plot_results=show_results
-        )
+        model_return, benchmark_return = self.display_backtesting_results(predictions_df)
 
-        # Generate classification report
-        class_report = classification_report(y, predictions, output_dict=True)
+        self.display_backtesting_results(predictions_df[-30:])
 
         # Compile comprehensive results
         results = {
@@ -616,15 +617,16 @@ class EthereumPricePredictionModel:
 
         if show_results:
             print(f"\n=== Model Evaluation Results ===")
+            print(f"Evaluation size: {len(y)}")
             print(f"Accuracy: {accuracy:.4f}")
             print(f"F1 Score (Weighted): {f1_weighted:.4f}")
             print(f"F1 Score (Macro): {f1_macro:.4f}")
             print(f"Backtest Return: {model_return:.2f}%")
-        print(f"Benchmark Return: {benchmark_return:.2f}%")
+            print(f"Benchmark Return: {benchmark_return:.2f}%")
 
         return results
     
-    def display_backtesting_results(self, predictions_df, y_true, plot_results=False):
+    def display_backtesting_results(self, predictions_df, plot_results=False):
         """
         Calculate returns from trading strategy based on predictions.
 
@@ -635,8 +637,8 @@ class EthereumPricePredictionModel:
         """
         backtesting_df = self.calculate_historical_backtesting(predictions_df)
 
-        model_capital = backtesting_df['capital'].values
-        benchmark_capital = backtesting_df['benchmark'].values
+        model_capital = backtesting_df['model_capital'].values
+        benchmark_capital = backtesting_df['benchmark_capital'].values
         did_invest = backtesting_df['did_invest'].values
 
         # Calculate performance metrics
@@ -818,15 +820,6 @@ class EthereumPricePredictionModel:
             end_date = pd.to_datetime(predictions_df['interval_start'].max())
             price_deltas = get_historical_prices(start_date, end_date, interval='1d')
 
-            # Ensure we have enough price data
-            if len(price_deltas) < len(predictions):
-                print(f"Warning: Limited price data ({len(price_deltas)} vs {len(predictions)} predictions)")
-                # Pad with zeros if needed
-                price_deltas = np.pad(price_deltas, (0, len(predictions) - len(price_deltas)), 'constant')
-            elif len(price_deltas) > len(predictions):
-                # Trim excess price data
-                price_deltas = price_deltas[:len(predictions)]
-
         except Exception as e:
             print(f"Warning: Could not fetch price data, using synthetic returns: {e}")
             # Generate synthetic price changes as fallback
@@ -841,8 +834,14 @@ class EthereumPricePredictionModel:
         # Get risk management parameters
         max_loss_rate = float(os.getenv('STRATEGY_STOP_LOSS_RATE', '0.05'))
 
+        # Ensure price_deltas and predictions are aligned
+        # price_deltas from np.diff() is one element shorter than predictions
+        min_length = min(len(predictions), len(price_deltas))
+        predictions = predictions[:min_length]
+        price_deltas = price_deltas[:min_length]
+
         # Calculate cumulative returns
-        for i in range(len(predictions)):
+        for i in range(min_length):
             # Benchmark (buy and hold) return
             benchmark_capital.append(benchmark_capital[-1] * (1 + price_deltas[i]))
 
@@ -886,14 +885,11 @@ class EthereumPricePredictionModel:
                     model_capital.append(model_capital[-1])
                     did_invest.append(0)
 
-        # Create result DataFrame with proper alignment
-        # Include initial state (t=0) and all prediction points
-        result_interval_starts = [interval_starts[0]] + list(interval_starts)
 
         backtesting_df = pd.DataFrame({
-            'interval_start': result_interval_starts,
-            'capital': model_capital,
-            'benchmark': benchmark_capital,
+            
+            'model_capital': model_capital,
+            'benchmark_capital': benchmark_capital,
             'did_invest': did_invest
         })
 
