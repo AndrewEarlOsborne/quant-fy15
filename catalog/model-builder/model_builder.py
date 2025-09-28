@@ -38,12 +38,12 @@ class ModelBuilder():
         data = pd.read_csv(data_file)
 
         # Convert date columns to datetime for comparison
-        data['date'] = pd.to_datetime(data['date'])
+        data['datetime'] = pd.to_datetime(data['datetime'])
 
         # Fix dtype issues - convert all numeric columns to float32
         numeric_columns = data.select_dtypes(include=['object']).columns
         for col in numeric_columns:
-            if col not in ['date', 'interval_start', 'interval_end_x', 'interval_end_y']:
+            if col not in ['interval_start', 'interval_end']:
                 try:
                     data[col] = pd.to_numeric(data[col], errors='coerce').astype('float32')
                 except:
@@ -52,8 +52,8 @@ class ModelBuilder():
         # Handle NaN values
         data = data.fillna(0.0)
 
-        start_date = data['date'].min()
-        end_date = data['date'].max()
+        start_date = data['datetime'].min()
+        end_date = data['datetime'].max()
 
         if self.start_date is None:
             self.start_date = start_date
@@ -112,9 +112,18 @@ class ModelBuilder():
 
         return results
 
-    def predict(self, x:pd.DataFrame) -> int:
+    def predict(self, X:pd.DataFrame) -> int:
         """Make a classification prediction on new data. Returns the class in range[0, num_classes)"""
-        return self.model.predict(x)
+        
+        # Ensure model is loaded and X contains all required features
+        if self.model is None:
+            raise ValueError("Model is not loaded. Load or train a model first.")
+        if X is None or X.empty:
+            raise ValueError("Input data for prediction is empty.")
+        missing_features = set(self.model.feature_columns) - set(X.columns)
+        if missing_features:
+            raise ValueError(f"Input data is missing required features: {missing_features}")
+        return self.model.predict(X)
 
     def _load_training_data(self) -> pd.DataFrame:
         """Load training data from filestate if it exists."""

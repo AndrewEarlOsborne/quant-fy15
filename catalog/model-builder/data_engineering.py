@@ -21,7 +21,7 @@ def engineer_features(config: DataConfig) -> DataFrame:
     logger = logging.getLogger(__name__)
 
     # Get price history first
-    price_history = get_price_features()
+    price_history = get_price_features(config)
 
     # Initialize whale and validator data
     for file in os.listdir('data/aggregated'):
@@ -32,8 +32,8 @@ def engineer_features(config: DataConfig) -> DataFrame:
     aggregated_results.head(2)
 
     # Convert to datetime and truncate to hour level (remove minutes/seconds)
-    aggregated_results['interval_start'] = pd.to_datetime(aggregated_results['interval_start']).dt.floor('H')
-    aggregated_results['interval_end'] = pd.to_datetime(aggregated_results['interval_end']).dt.floor('H')
+    aggregated_results['interval_start'] = pd.to_datetime(aggregated_results['interval_start'])
+    aggregated_results['interval_end'] = pd.to_datetime(aggregated_results['interval_end'])
 
     # Remove duplicates - keep first observation if multiple in same hour
     pre_dedup_count = len(aggregated_results)
@@ -41,7 +41,7 @@ def engineer_features(config: DataConfig) -> DataFrame:
     post_dedup_count = len(aggregated_results)
     logger.info(f"Removed {pre_dedup_count - post_dedup_count} duplicate observations in same hour")
 
-    results_with_price = aggregated_results.merge(price_history, on='interval_start', how='inner')
+    results_with_price = aggregated_results.merge(price_history, left_on='interval_start', right_on='datetime', how='inner')
 
     print(f"Unmerged Shapes{aggregated_results.shape} x {price_history.shape} :: Merged shape: {results_with_price.shape}")
 
@@ -56,68 +56,64 @@ def engineer_features(config: DataConfig) -> DataFrame:
     logger.info(f"Dropped {_pre_dropna - _post_dropna} rows for NAs.")
 
     # Sort by date to maintain temporal order
-    labeled_data.sort_values(by='date', inplace=True)
+    labeled_data.sort_values(by='datetime', inplace=True)
 
-    # Define which features should be windowed
+    # Define which features should be windowed and kept features
     windowed_features = ['delta', 'volume']
+    kept_features = windowed_features + [
+        'validator_count', 'validator_total_value_eth', 'validator_avg_value_eth',
+        'whale_count', 'whale_avg_value_eth', 'whale_total_value_eth'
+    ]
 
     # Get feature columns (excluding metadata and target)
-    sensitive_cols = ['interval_start', 'close_price', 'label']
+    sensitive_cols = ['interval_start', 'datetime', 'price', 'label', 'delta', 'datetime', 'interval_end']
 
-    # Separate windowed and non-windowed features
-    windowed_cols = [col for col in windowed_features if col in labeled_data.columns]
-    non_windowed_cols = [col for col in labeled_data.columns
-                        if col not in sensitive_cols and col not in windowed_features]
+    # Filter to only kept features that exist in the data
+    available_features = [col for col in kept_features if col in labeled_data.columns]
 
     y = labeled_data['label'].astype(int).values
 
-    # Create windowed features only for selected columns
-    X_windowed_data = labeled_data[windowed_cols].values
-    X_windowed = _create_windows(X_windowed_data, config.window_length)
-    y_windowed = y[config.window_length-1:]
+    # Create windowed features as flat columns
+    feature_data = []
+    feature_names = []
 
-    # Get non-windowed features for the same time period
-    X_non_windowed = labeled_data[non_windowed_cols].iloc[config.window_length-1:].values
+    # Add windowed features
+    for feature in windowed_features:
+        if feature in labeled_data.columns:
+            feature_values = labeled_data[feature].values
+            for i in range(config.window_length):
+                # Create lagged features (t-0 is most recent, t-9 is oldest)
+                lag = config.window_length - 1 - i
+                lagged_values = np.roll(feature_values, lag)
+                # Set initial values to 0 for periods where we don't have history
+                lagged_values[:lag] = 0
+                feature_data.append(lagged_values)
+                feature_names.append(f"{feature}_t-{i}")
 
-    # date based balancing # TODO
-    min_samples = min(len(X_windowed), len(y_windowed), len(X_non_windowed))
-    X_windowed = X_windowed[:min_samples]
-    X_non_windowed = X_non_windowed[:min_samples]
-    y_windowed = y_windowed[:min_samples]
+    # Add non-windowed features (validator and whale features)
+    for feature in available_features:
+        if feature not in windowed_features:
+            feature_data.append(labeled_data[feature].values)
+            feature_names.append(feature)
 
-    # Create column names for windowed features
-    window_length = config.window_length
-    windowed_columns = []
-    for i in range(window_length):
-        for feature in windowed_cols:
-            windowed_columns.append(f"{feature}_t-{window_length-1-i}")
-
-    # Reshape windowed data to 2D and combine with non-windowed features
-    X_windowed_flattened = X_windowed.reshape(X_windowed.shape[0], -1)
-
-    # Combine windowed and non-windowed features
-    all_columns = windowed_columns + non_windowed_cols
-    if len(X_non_windowed) > 0:
-        X_combined = np.hstack([X_windowed_flattened, X_non_windowed])
+    # Combine all features
+    if feature_data:
+        X_combined = np.column_stack(feature_data)
     else:
-        X_combined = X_windowed_flattened
+        X_combined = np.empty((len(labeled_data), 0))
 
     # Create final DataFrame
-    result_df = pd.DataFrame(X_combined, columns=all_columns)
-    result_df['label'] = y_windowed
+    result_df = pd.DataFrame(X_combined, columns=feature_names)
+    result_df['label'] = y
 
-    # Add metadata columns for the last timestamp (most recent)
-    last_indices = labeled_data.index[config.window_length-1:config.window_length-1+min_samples]
-
-    # Add all metadata columns (sensitive_cols already includes interval_start, date is separate)
-    metadata_cols = sensitive_cols + ['date']
-    for col in metadata_cols:
-        if col not in result_df.columns:  # Avoid overwriting existing columns
-            result_df[col] = labeled_data.loc[last_indices, col].values
+    # Add metadata columns
+    for col in sensitive_cols:
+        if col in labeled_data.columns and col not in result_df.columns:
+            result_df[col] = labeled_data[col].values
 
     return result_df
 
-def get_price_features() -> DataFrame:
+def get_price_features(config) -> DataFrame:
     """Load and engineer features from local price history data. Get the prices interval for the time given in .env"""
 
     for file in os.listdir('data/price_history/'):
@@ -128,66 +124,59 @@ def get_price_features() -> DataFrame:
 
     # Convert to datetime and truncate to hour level for consistent matching
     hist_data['Open time'] = pd.to_datetime(hist_data['Open time']).dt.floor('H')
-    hist_data['Close time'] = pd.to_datetime(hist_data['Close time']).dt.floor('H')
 
     print(f"Loaded {hist_data.shape[1]} records from local price history")
 
     # TODO: handle other data sources
     column_mapping = {
-        'Open time': 'interval_start',
-        'Close time': 'interval_end',
+        'Open time': 'datetime',
+        'Close': 'price',
+        'Volume': 'volume',
         'Open': 'open',
         'High': 'high',
-        'Low': 'low',
-        'Close': 'close_price',
-        'Volume': 'volume'
+        'Low': 'low'
     }
 
     # Rename columns
     hist_data = hist_data.rename(columns=column_mapping)
 
     # Remove duplicates in same hour - keep first observation
-    hist_data = hist_data.drop_duplicates(subset=['interval_start'], keep='first')
+    hist_data = hist_data.drop_duplicates(subset=['datetime'], keep='first')
 
-    # Also create trade_volume alias for volume
-    hist_data['trade_volume'] = hist_data['volume']
-
-    # Create date column from interval_start
-    hist_data['date'] = hist_data['interval_start'].dt.date
+    # Create date column from datetime
+    hist_data['date'] = hist_data['datetime'].dt.date
     
     # Feature engineering
-    hist_data['close_price'] = pd.to_numeric(hist_data['close_price'], errors='coerce')
-    hist_data['close_price'] = hist_data['close_price'].interpolate(method='linear', limit_direction='both')
-    
+    hist_data['price'] = pd.to_numeric(hist_data['price'], errors='coerce')
+    hist_data['price'] = hist_data['price'].interpolate(method='linear', limit_direction='both')
+
     # Price change features
-    hist_data['delta'] = hist_data['close_price'].pct_change()
+    hist_data['delta'] = hist_data['price'].pct_change()
     hist_data['lag1_delta'] = hist_data['delta'].shift(1, fill_value=0)
     hist_data['lag2_delta'] = hist_data['delta'].shift(2, fill_value=0)
-    
+
     # Volatility features
     hist_data['volatility'] = hist_data['delta'].shift(1).rolling(window=7, min_periods=1).std()
     hist_data['volume_delta'] = hist_data['volume'].shift(1).pct_change()
-    
+
     # Price range features
-    hist_data['price_range'] = (hist_data['high'] - hist_data['low']) / hist_data['close_price']
-    hist_data['open_close_ratio'] = hist_data['open'] / hist_data['close_price']
-    
+    hist_data['price_range'] = (hist_data['high'] - hist_data['low']) / hist_data['price']
+    hist_data['open_close_ratio'] = hist_data['open'] / hist_data['price']
+
     # Moving averages
-    hist_data['ma_7'] = hist_data['close_price'].rolling(window=7, min_periods=1).mean()
-    hist_data['ma_14'] = hist_data['close_price'].rolling(window=14, min_periods=1).mean()
-    hist_data['close_ma7_ratio'] = hist_data['close_price'] / hist_data['ma_7']
-    hist_data['close_ma14_ratio'] = hist_data['close_price'] / hist_data['ma_14']
+    hist_data['m_avg'] = hist_data['price'].rolling(window=config.window_length, min_periods=1).mean()
+    hist_data['price_m_avg_ratio'] = hist_data['price'] / hist_data['m_avg']
     
     # Volume features
-    hist_data['volume_ma_7'] = hist_data['volume'].rolling(window=7, min_periods=1).mean()
-    hist_data['volume_ratio'] = hist_data['volume'] / hist_data['volume_ma_7']
+    hist_data['volume_m_avg'] = hist_data['volume'].rolling(window=7, min_periods=1).mean()
+    hist_data['volume_ratio'] = hist_data['volume'] / hist_data['volume_m_avg']
     
     # # Fill any remaining NaN values
     # hist_data = hist_data.fillna(method='ffill').fillna(method='bfill')
     
-    # Sort by date
-    hist_data.sort_values(by='interval_start', inplace=True)
-    
+    # Sort by datetime
+    hist_data.sort_values(by='datetime', inplace=True)
+
     return hist_data
 
 
@@ -251,50 +240,61 @@ def make_labels(data:DataFrame, num_labels: int = 3, strategy="linspace") -> Dat
         
 
 def show_label_distribution(data:DataFrame):
-    """Plot the distribution of labels across price delta distribution, and the cutoff points for each labeling bin.
-    Plots a frequency distribution of price delta occurances colored by the labeling. 
-    
+    """Plot the distribution of labels across price delta distribution using a stacked bar chart.
+    Shows frequency distribution of price delta occurrences with labels stacked within each bin.
+
     Args:
         Data: a dataframe with a label and a price delta feature"""
-    
+
     df = data[['delta', 'label']].copy()
-    
+
     # Convert delta to percentage
     df['delta_pct'] = df['delta'] * 100
-    
+
     # Remove NaN values
     df = df.dropna()
-    
+
     if df.empty:
         print("No data to plot")
         return
-    
+
     # Create figure and axis
     fig, ax = plt.subplots(figsize=(12, 6))
-    
+
     # Get unique labels for coloring
     unique_labels = sorted(df['label'].unique())
     colors = plt.cm.Set3(np.linspace(0, 1, len(unique_labels)))
 
     data_min, data_max = df['delta_pct'].min(), df['delta_pct'].max()
     bins = np.linspace(data_min, data_max, 51)
+    bin_centers = (bins[:-1] + bins[1:]) / 2
+    bin_width = bins[1] - bins[0]
 
-    # Plot histogram for each label using the same bins
-    for i, label in enumerate(unique_labels):
+    # Calculate histogram data for each label
+    label_counts = {}
+    for label in unique_labels:
         label_data = df[df['label'] == label]['delta_pct']
-        ax.hist(label_data, bins=bins, alpha=0.7, label=f'Label {label}',
+        counts, _ = np.histogram(label_data, bins=bins)
+        label_counts[label] = counts
+
+    # Create stacked bar chart
+    bottom = np.zeros(len(bin_centers))
+    for i, label in enumerate(unique_labels):
+        ax.bar(bin_centers, label_counts[label], bottom=bottom,
+               width=bin_width*0.8, label=f'Label {label}',
                color=colors[i], edgecolor='black', linewidth=0.5)
-    
+        bottom += label_counts[label]
+
     # Customize the plot
     ax.set_xlabel('Price Delta (%)')
     ax.set_ylabel('Frequency')
-    ax.set_title('Distribution of Price Delta Changes by Label')
+    ax.set_title('Distribution of Price Delta Changes by Label (Stacked)')
     ax.legend()
     ax.grid(True, alpha=0.3)
-    
+
     # Add vertical line at zero
     ax.axvline(x=0, color='red', linestyle='--', linewidth=2, alpha=0.8, label='No Change')
-    
+
     plt.tight_layout()
     plt.show()
     

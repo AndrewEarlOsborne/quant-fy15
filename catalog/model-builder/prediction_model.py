@@ -271,34 +271,42 @@ class EthereumPricePredictionModel:
                        kernel_regularizer=l2(0.01))(x)
 
         return Model(inputs, outputs, name="Transformer")
+
+    def _build_flat_model(self, model_type):
+        """Build a simple dense neural network for flat features"""
+        input_layer = Input(shape=(self.num_features,), name='flat_input')
+
+        if model_type == "TCN":
+            # Dense layers mimicking TCN structure
+            x = Dense(64, activation='relu', kernel_regularizer=l2(0.01))(input_layer)
+            x = Dropout(0.3)(x)
+            x = Dense(32, activation='relu', kernel_regularizer=l2(0.01))(x)
+            x = Dropout(0.3)(x)
+        else:  # Transformer
+            # Dense layers mimicking Transformer structure
+            x = Dense(64, activation='relu', kernel_regularizer=l2(0.01))(input_layer)
+            x = Dropout(0.3)(x)
+            x = Dense(32, activation='relu', kernel_regularizer=l2(0.01))(x)
+            x = Dropout(0.3)(x)
+
+        outputs = Dense(self.num_classes, activation='softmax', kernel_regularizer=l2(0.01))(x)
+
+        return Model(input_layer, outputs, name=model_type)
     
-    def _train_keras_model(self, model, X_windowed, X_static, y_train,
+    def _train_keras_model(self, model, X, y_train,
                           epochs=100, batch_size=64, model_name="Model"):
         """Train Keras model with time series cross-validation"""
         train_preds = np.zeros(len(y_train))
-        test_preds_list = []
 
         tscv = TimeSeriesSplit(n_splits = self.num_classes)
         total_folds = self.num_classes
 
-        for fold_idx, (train_idx, val_idx) in enumerate(tscv.split(X_windowed)):
+        for fold_idx, (train_idx, val_idx) in enumerate(tscv.split(X)):
             fold_num = fold_idx + 1
             fold_start_time = time.time()
 
-            # Prepare data based on model input structure
-            if hasattr(model, 'input_names') and len(model.input_names) > 1:
-                # Multi-input model
-                X_tr = [X_windowed[train_idx], X_static[train_idx]]
-                X_val = [X_windowed[val_idx], X_static[val_idx]]
-            elif self.num_windowed_features > 0:
-                # Windowed input only
-                X_tr = X_windowed[train_idx]
-                X_val = X_windowed[val_idx]
-            else:
-                # Static input only
-                X_tr = X_static[train_idx]
-                X_val = X_static[val_idx]
-
+            X_tr = X[train_idx]
+            X_val = X[val_idx]
             y_tr, y_val = y_train[train_idx], y_train[val_idx]
 
             model_fold = tf.keras.models.clone_model(model)
@@ -381,53 +389,26 @@ class EthereumPricePredictionModel:
 
         # Automatically determine feature columns if not set
         if self.feature_columns is None:
-            exclude_cols = ['label', 'interval_start', 'close_price', 'delta', 'date', 'Unnamed: 0']
+            exclude_cols = ['label', 'interval_start', 'datetime', 'price', 'delta', 'date', 'interval_end', 'Unnamed: 0']
             self.feature_columns = [col for col in data.columns if col not in exclude_cols]
 
-        # Separate windowed and non-windowed features based on data structure
-        windowed_features = ['delta', 'volume']  # Features that should be windowed
-        actual_window_length = 10  # Based on t-0 to t-9 pattern
+        print(f"Total features: {len(self.feature_columns)} columns")
 
-        # Identify windowed columns (those with timestep suffixes)
-        windowed_columns = []
-        static_columns = []
-
-        for col in self.feature_columns:
-            is_windowed = any(f"{feature}_t-" in col for feature in windowed_features)
-            if is_windowed:
-                windowed_columns.append(col)
-            else:
-                static_columns.append(col)
-
-        print(f"Windowed features: {len(windowed_columns)} columns")
-        print(f"Static features: {len(static_columns)} columns")
-
-        # Extract windowed and static data
-        if windowed_columns:
-            X_windowed = data[windowed_columns].values
-            # Reshape windowed features: (samples, window_length, num_windowed_features)
-            num_windowed_features = len(windowed_features)
-            X_windowed = X_windowed.reshape(X_windowed.shape[0], actual_window_length, num_windowed_features)
-        else:
-            X_windowed = np.empty((len(data), actual_window_length, 0))
-
-        if static_columns:
-            X_static = data[static_columns].values
-        else:
-            X_static = np.empty((len(data), 0))
+        # Extract all features as flat data
+        X_data = data[self.feature_columns]
+        X_data = X_data.apply(pd.to_numeric, errors='coerce').fillna(0.0).astype('float32')
+        X = X_data.values
 
         y_train = data['label'].values
 
         # Store feature structure for later use
-        self.windowed_columns = windowed_columns
-        self.static_columns = static_columns
-        self.num_windowed_features = len(windowed_features) if windowed_columns else 0
-        self.num_static_features = len(static_columns)
+        self.feature_columns = list(self.feature_columns)
+        self.num_features = len(self.feature_columns)
 
-        # Initialize models
+        # Initialize models with flat feature structure
         print("Initializing models...")
-        self.tcn_model = self._build_tcn_model(self.num_windowed_features, self.num_static_features)
-        self.transformer_model = self._build_transformer_model(self.num_windowed_features, self.num_static_features)
+        self.tcn_model = self._build_flat_model("TCN")
+        self.transformer_model = self._build_flat_model("Transformer")
         self.xgb_model = XGBClassifier(
             n_estimators=100, max_depth=5, learning_rate=0.2,
             random_state=self.random_seed
@@ -448,7 +429,7 @@ class EthereumPricePredictionModel:
         print(f"\n[1/4] Training TCN Model...")
         stage_start = time.time()
         tcn_train_preds = self._train_keras_model(
-            self.tcn_model, X_windowed, X_static, y_train, model_name="TCN"
+            self.tcn_model, X, y_train, model_name="TCN"
         )
         stage_time = time.time() - stage_start
         print(f"TCN training completed in {stage_time:.1f}s")
@@ -458,7 +439,7 @@ class EthereumPricePredictionModel:
         print(f"\n[2/4] Training Transformer Model...")
         stage_start = time.time()
         transformer_train_preds = self._train_keras_model(
-            self.transformer_model, X_windowed, X_static, y_train, model_name="Transformer"
+            self.transformer_model, X, y_train, model_name="Transformer"
         )
         stage_time = time.time() - stage_start
         print(f"Transformer training completed in {stage_time:.1f}s")
@@ -467,10 +448,8 @@ class EthereumPricePredictionModel:
         # Stage 3: XGBoost Training
         print(f"\n[3/4] Training XGBoost Model...")
         stage_start = time.time()
-        # For XGBoost, flatten all features
-        X_combined = np.concatenate([X_windowed.reshape(len(X_windowed), -1), X_static], axis=1)
         xgb_train_preds = self._train_sklearn_model(
-            self.xgb_model, X_combined, y_train, model_name="XGBoost"
+            self.xgb_model, X, y_train, model_name="XGBoost"
         )
         stage_time = time.time() - stage_start
         print(f"XGBoost training completed in {stage_time:.1f}s")
@@ -538,56 +517,17 @@ class EthereumPricePredictionModel:
         # Ensure numeric dtype and handle NaN values using pandas
         X_data = X_data.apply(pd.to_numeric, errors='coerce').fillna(0.0).astype('float32')
 
-        # Separate windowed and static features
-        if hasattr(self, 'windowed_columns') and hasattr(self, 'static_columns'):
-            windowed_columns = self.windowed_columns
-            static_columns = self.static_columns
-            num_windowed_features = getattr(self, 'num_windowed_features', 0)
-            num_static_features = getattr(self, 'num_static_features', 0)
-        else:
-            # Fallback for models trained before refactor
-            windowed_features = ['delta', 'volume']
-            windowed_columns = []
-            static_columns = []
-            for col in self.feature_columns:
-                is_windowed = any(f"{feature}_t-" in col for feature in windowed_features)
-                if is_windowed:
-                    windowed_columns.append(col)
-                else:
-                    static_columns.append(col)
-
-            num_windowed_features = len(windowed_features) if windowed_columns else 0
-            num_static_features = len(static_columns)
-
-        # Extract windowed and static data
-        if windowed_columns:
-            X_windowed = X_data[windowed_columns].values
-            X_windowed = X_windowed.reshape(X_windowed.shape[0], 10, num_windowed_features)
-        else:
-            X_windowed = np.empty((len(X_data), 10, 0))
-
-        if static_columns:
-            X_static = X_data[static_columns].values
-        else:
-            X_static = np.empty((len(X_data), 0))
-
-        # Prepare inputs for models
-        if num_windowed_features > 0 and num_static_features > 0:
-            model_inputs = [X_windowed, X_static]
-        elif num_windowed_features > 0:
-            model_inputs = X_windowed
-        else:
-            model_inputs = X_static
+        # Use flat feature structure
+        X = X_data.values
 
         # Get base model predictions
-        tcn_preds = np.argmax(self.tcn_model.predict(model_inputs, verbose=0), axis=1)
+        tcn_preds = np.argmax(self.tcn_model.predict(X, verbose=0), axis=1)
         transformer_preds = np.argmax(
-            self.transformer_model.predict(model_inputs, verbose=0), axis=1
+            self.transformer_model.predict(X, verbose=0), axis=1
         )
 
-        # For XGBoost, flatten all features
-        X_combined = np.concatenate([X_windowed.reshape(len(X_windowed), -1), X_static], axis=1)
-        xgb_preds = self.xgb_model.predict(X_combined)
+        # XGBoost uses the same flat features
+        xgb_preds = self.xgb_model.predict(X)
 
         # Create meta-features and predict
         meta_features = np.column_stack((tcn_preds, transformer_preds, xgb_preds))
@@ -595,13 +535,13 @@ class EthereumPricePredictionModel:
 
         return final_predictions
     
-    def evaluate(self, data:pd.DataFrame, do_plots=True):
+    def evaluate(self, data:pd.DataFrame, show_results=True):
         """
         Evaluate model performance using self.evaluation_data.
         Calculates classification accuracy, creates visualizations, and performs backtesting.
 
         Args:
-            do_plots (bool): Whether to generate plots and visualizations
+            show_results (bool): Whether to generate plots and visualizations
 
         Returns:
             dict: Comprehensive evaluation metrics
@@ -610,7 +550,7 @@ class EthereumPricePredictionModel:
         label_cols = ['label']
         feature_cols = [col for col in data.columns if col not in label_cols]
 
-        print(feature_cols)
+        print(f"Feature Cols in Predictor.eval: {feature_cols}")
 
         X = data[feature_cols]
         y = data['label']
@@ -623,17 +563,12 @@ class EthereumPricePredictionModel:
         f1_weighted = f1_score(y, predictions, average='weighted')
         f1_macro = f1_score(y, predictions, average='macro')
 
-        # Generate confusion matrix
-        cm = confusion_matrix(y, predictions)
-
-        # Classification report
-        class_report = classification_report(y, predictions, output_dict=True)
-
-        if do_plots:
+        if show_results:
             # Create plots with specified requirements
             plt.figure(figsize=(12, 8))
 
             # Plot confusion matrix
+            cm = confusion_matrix(y, predictions)
             plt.subplot(2, 2, 1)
             class_names = [f'Class {i}' for i in range(self.num_classes)]
             sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
@@ -655,13 +590,16 @@ class EthereumPricePredictionModel:
 
         # Backtesting analysis
         predictions_df = pd.DataFrame({
-            'interval_start': data.get('interval_start', pd.date_range(start='2024-01-01', periods=len(predictions), freq='1H')),
+            'interval_start': data.get('interval_start', pd.date_range(start='2024-01-01', periods=len(predictions), freq='1h')),
             'label': predictions
         })
 
         model_return, benchmark_return = self.display_backtesting_results(
-            predictions_df, y, plot_results=do_plots
+            predictions_df, y, plot_results=show_results
         )
+
+        # Generate classification report
+        class_report = classification_report(y, predictions, output_dict=True)
 
         # Compile comprehensive results
         results = {
@@ -669,19 +607,19 @@ class EthereumPricePredictionModel:
             'f1_score_weighted': f1_weighted,
             'f1_score_macro': f1_macro,
             'confusion_matrix': cm,
-            'classification_report': class_report,
+            # 'classification_report': class_report,
             'predictions': predictions,
             'y_true': y.values,
             'model_return': model_return,
             'backtest_return': benchmark_return
         }
 
-        # Print summary
-        print(f"\n=== Model Evaluation Results ===")
-        print(f"Accuracy: {accuracy:.4f}")
-        print(f"F1 Score (Weighted): {f1_weighted:.4f}")
-        print(f"F1 Score (Macro): {f1_macro:.4f}")
-        print(f"Backtest Return: {model_return:.2f}%")
+        if show_results:
+            print(f"\n=== Model Evaluation Results ===")
+            print(f"Accuracy: {accuracy:.4f}")
+            print(f"F1 Score (Weighted): {f1_weighted:.4f}")
+            print(f"F1 Score (Macro): {f1_macro:.4f}")
+            print(f"Backtest Return: {model_return:.2f}%")
         print(f"Benchmark Return: {benchmark_return:.2f}%")
 
         return results
@@ -731,12 +669,11 @@ class EthereumPricePredictionModel:
                     linestyle='--', linewidth=2)
             plt.title(f'Trading Strategy Performance\n'
                      f'Model: {final_model_return:.2f}% | Benchmark: {final_benchmark_return:.2f}% | Sharpe: {sharpe_ratio:.2f}')
-            plt.xlabel('Trading Days')
+            plt.xlabel('Invervals Elapsed')
             plt.ylabel('Portfolio Value')
             plt.grid(True, alpha=0.3)
             plt.legend()
 
-            # Benchmark for last month (30 days)
             plt.subplot(2, 2, 4)
             last_month_days = min(30, len(model_capital))
             last_month_model = model_capital[-last_month_days:]
@@ -745,20 +682,6 @@ class EthereumPricePredictionModel:
             plt.plot(range(last_month_days), last_month_model, label='Model Strategy', color='blue', linewidth=2)
             plt.plot(range(last_month_days), last_month_benchmark, label='Buy & Hold', color='black',
                     linestyle='--', linewidth=2)
-
-            # Calculate last month returns
-            last_month_model_return = ((last_month_model[-1] / last_month_model[0]) - 1) * 100 if len(last_month_model) > 0 else 0
-            last_month_benchmark_return = ((last_month_benchmark[-1] / last_month_benchmark[0]) - 1) * 100 if len(last_month_benchmark) > 0 else 0
-
-            plt.title(f'Last Month Performance\n'
-                     f'Model: {last_month_model_return:.2f}% | Benchmark: {last_month_benchmark_return:.2f}%')
-            plt.xlabel('Days (Last Month)')
-            plt.ylabel('Portfolio Value')
-            plt.grid(True, alpha=0.3)
-            plt.legend()
-
-            plt.tight_layout()
-            plt.show()
 
         return (final_model_return, final_benchmark_return)
     

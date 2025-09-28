@@ -158,9 +158,6 @@ def main():
             # Merge results into one 
             aggregate_results:pd.DataFrame = pd.merge(whale_results, validator_results, 'inner', ['interval_start', 'interval_end'])
 
-            # logger.debug(" ========== Features found ==========")
-            # logger.debug(f"{aggregate_results.columns}")
-
             if not aggregate_results.empty:
 
                 output_filename = f"{str(aggregate_results.iloc[0]['interval_start'])}_{str(aggregate_results.iloc[-1]['interval_start'])}_aggregated.csv"

@@ -58,13 +58,13 @@ Live Data → Feature Engineering → Prediction → Position Sizing → Exchang
 ```python
 # Before
 prediction_interval = os.get_env('PREDICTION_INTERVAL')
-start_date: datetime = min(whales['date'], validators['date'])
+start_date: datetime = min(whales['datetime'], validators['datetime'])
 
 # After  
 prediction_interval = os.getenv('PREDICTION_INTERVAL', '1d')
-whales['date'] = pd.to_datetime(whales['date'])
-validators['date'] = pd.to_datetime(validators['date'])
-start_date = min(whales['date'].min(), validators['date'].min())
+whales['datetime'] = pd.to_datetime(whales['datetime'])
+validators['datetime'] = pd.to_datetime(validators['datetime'])
+start_date = min(whales['datetime'].min(), validators['datetime'].min())
 ```
 
 ### 2. Trading Engine Issues
