@@ -41,6 +41,9 @@ def engineer_features(config: DataConfig) -> DataFrame:
     logger.info(f"Making {config.num_classes} labels using {config.label_strategy}.")
     labeled_data:pd.DataFrame = make_labels(results_with_price.copy(), config.num_classes, config.label_strategy)
 
+    #TODO: delete
+    print(f"Labeled nrows: {labeled_data.shape[0]}")
+
     # TODO: volume
     # results_with_price['volume_m_avg'] = results_with_price['volume'].rolling(window=config.window_length, min_periods=1).mean()
 
@@ -67,6 +70,9 @@ def engineer_features(config: DataConfig) -> DataFrame:
 
     # Select features and build windows.
     labeled_data = labeled_data[X_features + ['label', 'delta']]
+
+    #TODO: delete
+    print(f"Engineered nrows: {labeled_data.shape[0]}")
 
     windowed_features = ['delta', 'validator_count', 'whale_avg_value_eth']
     result_df = build_window_features(labeled_data, windowed_features, config.window_length)
