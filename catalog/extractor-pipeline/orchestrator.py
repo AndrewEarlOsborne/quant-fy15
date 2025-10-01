@@ -14,7 +14,7 @@ import json
 import logging
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Set
 from dotenv import load_dotenv
@@ -161,18 +161,35 @@ class Orchestrator:
             return False
             
     def _get_vm_time_range(self, vm_index: int) -> tuple:
-        """Calculate time range for specific VM."""
+        """Calculate time range for specific VM with hour boundary alignment."""
         start_dt = datetime.strptime(self.start_date, '%Y-%m-%d-%H:%M')
         end_dt = datetime.strptime(self.end_date, '%Y-%m-%d-%H:%M')
-        duration_per_vm = (end_dt - start_dt) / self.num_vms
-        
-        vm_start = start_dt + (duration_per_vm * vm_index)
-        vm_end = start_dt + (duration_per_vm * (vm_index + 1))
-        
-        # Ensure last VM gets exact end time
+
+        # Ensure start and end dates are aligned to hour boundaries
+        start_dt = start_dt.replace(minute=0, second=0, microsecond=0)
+        end_dt = end_dt.replace(minute=0, second=0, microsecond=0)
+
+        # Calculate total hours and hours per VM
+        total_hours = int((end_dt - start_dt).total_seconds() / 3600)
+        hours_per_vm = total_hours // self.num_vms
+        remaining_hours = total_hours % self.num_vms
+
+        # Calculate this VM's hour allocation (distribute remainder across first VMs)
+        vm_hours = hours_per_vm + (1 if vm_index < remaining_hours else 0)
+
+        # Calculate start time for this VM
+        hours_before_this_vm = sum(
+            hours_per_vm + (1 if i < remaining_hours else 0)
+            for i in range(vm_index)
+        )
+
+        vm_start = start_dt + timedelta(hours=hours_before_this_vm)
+        vm_end = vm_start + timedelta(hours=vm_hours)
+
+        # Ensure last VM gets exact end time (should already be hour-aligned)
         if vm_index == self.num_vms - 1:
             vm_end = end_dt
-            
+
         return (vm_start.strftime('%Y-%m-%d-%H:%M'), vm_end.strftime('%Y-%m-%d-%H:%M'))
         
     def _initialize_vm(self, vm_name: str, vm_index: int) -> bool:
@@ -266,47 +283,70 @@ echo "Setup complete"
         """Wait for VM to reach running state and SSH readiness."""
         self.logger.info(f"VM {vm_name} created, waiting for running state...")
         max_attempts = 20
-        
+
         for attempt in range(max_attempts):
             try:
-                # Check VM status
+                # Check VM status with retry logic
                 cmd = ["gcloud", "compute", "instances", "describe", vm_name,
                        "--project", self.project_id, "--zone", self.zone,
                        "--format", "value(status)", "--quiet"]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-                
-                if result.returncode != 0:
-                    self._log_vm_failure(vm_name, "WAIT_RUNNING_STATE", result.stdout, result.stderr, result.returncode)
+
+                describe_success = False
+                for retry in range(3):
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+
+                    if result.returncode == 0:
+                        describe_success = True
+                        break
+                    else:
+                        if retry < 2:
+                            self.logger.warning(f"VM {vm_name} describe failed (attempt {retry + 1}/3), retrying in 2 seconds...")
+                            time.sleep(2)
+                        else:
+                            self._log_vm_failure(vm_name, "WAIT_RUNNING_STATE", result.stdout, result.stderr, result.returncode)
+
+                if not describe_success:
                     return False
-                    
+
                 vm_status = result.stdout.strip()
-                
+
                 if vm_status == "RUNNING":
-                    # Test SSH connectivity
+                    # Test SSH connectivity with retry logic
                     ssh_cmd = ["gcloud", "compute", "ssh", vm_name,
                               "--project", self.project_id, "--zone", self.zone,
                               "--command", "echo 'SSH ready'",
                               "--quiet"]
-                    
-                    ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=60)
-                    if ssh_result.returncode == 0:
-                        self.logger.debug(f"Running SSH stdout: {ssh_result.stdout}")
+
+                    ssh_success = False
+                    for retry in range(3):
+                        ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=60)
+
+                        if ssh_result.returncode == 0:
+                            self.logger.debug(f"Running SSH stdout: {ssh_result.stdout}")
+                            ssh_success = True
+                            break
+                        else:
+                            if retry < 2:
+                                self.logger.warning(f"VM {vm_name} SSH connection failed (attempt {retry + 1}/3), retrying in 2 seconds...")
+                                time.sleep(2)
+                            else:
+                                self.logger.debug(f"SSH not ready for {vm_name}: stdout='{ssh_result.stdout}', stderr='{ssh_result.stderr}'")
+
+                    if ssh_success:
                         return True
-                    else:
-                        self.logger.debug(f"SSH not ready for {vm_name}: stdout='{ssh_result.stdout}', stderr='{ssh_result.stderr}'")
-                        
+
                 elif vm_status in ["PROVISIONING", "STAGING"]:
                     time.sleep(20)
                     continue
                 else:
                     self.logger.error(f"VM {vm_name} failed with status: {vm_status}")
                     return False
-                    
+
             except Exception as e:
                 self.logger.error(f"Error checking VM {vm_name}: {e}")
-                
+
             time.sleep(60)
-            
+
         self.logger.error(f"VM {vm_name} failed to become ready within timeout")
         return False
         
@@ -366,38 +406,62 @@ DATA_DIRECTORY=data
     def _get_vm_status(self, vm_name: str) -> str:
         """Get VM status: starting, running (with progress fraction), completed, failed."""
         try:
-            # Check VM exists and is running
+            # Check VM exists and is running with retry logic
             cmd = ["gcloud", "compute", "instances", "describe", vm_name,
                    "--project", self.project_id, "--zone", self.zone,
                    "--format", "value(status)", "--quiet"]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-            
-            if result.returncode != 0:
-                self._log_vm_failure(vm_name, "STATUS_CHECK", result.stdout, result.stderr, result.returncode)
+
+            describe_success = False
+            for retry in range(3):
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+
+                if result.returncode == 0:
+                    describe_success = True
+                    break
+                else:
+                    if retry < 2:
+                        self.logger.warning(f"VM {vm_name} status check describe failed (attempt {retry + 1}/3), retrying in 2 seconds...")
+                        time.sleep(2)
+                    else:
+                        self._log_vm_failure(vm_name, "STATUS_CHECK", result.stdout, result.stderr, result.returncode)
+
+            if not describe_success:
                 return "failed"
-                
+
             vm_status = result.stdout.strip()
-            
+
             if vm_status in ["PROVISIONING", "STAGING"]:
                 return "starting"
             elif vm_status != "RUNNING":
                 self.logger.error(f"VM {vm_name} in unexpected state: {vm_status}")
                 return "failed"
-                
+
+            # SSH status check with retry logic
             ssh_cmd = ["gcloud", "compute", "ssh", vm_name,
                       "--project", self.project_id, "--zone", self.zone,
                       "--command", "cat extractor/status.txt 2>/dev/null || echo 'NO_STATUS'",
                       "--quiet"]
-            
-            ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=30)
-            
-            if ssh_result.returncode == 0:
+
+            ssh_success = False
+            for retry in range(3):
+                ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=30)
+
+                if ssh_result.returncode == 0:
+                    ssh_success = True
+                    break
+                else:
+                    if retry < 2:
+                        self.logger.warning(f"VM {vm_name} SSH status check failed (attempt {retry + 1}/3), retrying in 2 seconds...")
+                        time.sleep(2)
+                    else:
+                        self.logger.debug(f"SSH status check failed for {vm_name}: stdout='{ssh_result.stdout}', stderr='{ssh_result.stderr}'")
+
+            if ssh_success:
                 status_text = ssh_result.stdout.strip()
 
                 self.logger.debug(f"VM {vm_name} status: {status_text}")
-                
+
                 if status_text == "COMPLETED":
-                    # Cleanup the VM
                     self.logger.info(f"VM {vm_name} completed - collecting and stopping")
                     self._get_results(vm_name)
                     self._delete_vm(vm_name)
@@ -407,15 +471,13 @@ DATA_DIRECTORY=data
                 elif status_text == ["STARTING"]:
                     return "running"
                 else:
-                    # Check if status contains progress information
                     if "/" in status_text and status_text.replace("/", "").replace(" ", "").isdigit():
                         return f"running {status_text}"
                     else:
                         return "running"
             else:
-                self.logger.debug(f"SSH status check failed for {vm_name}: stdout='{ssh_result.stdout}', stderr='{ssh_result.stderr}'")
                 return "running"
-                
+
         except Exception as e:
             self.logger.error(f"Failed to get status for {vm_name}: {e}")
             return "failed"

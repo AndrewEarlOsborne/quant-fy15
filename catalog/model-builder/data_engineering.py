@@ -28,14 +28,25 @@ def engineer_features(config: DataConfig) -> DataFrame:
             aggregated_results = pd.read_csv(f"data/aggregated/{file}")
             logger.info(f'Starting Engineering with file {aggregated_results}')
 
-    aggregated_results['interval_start'] = pd.to_datetime(aggregated_results['interval_start'])
-    aggregated_results['interval_end'] = pd.to_datetime(aggregated_results['interval_end'])
+    # Ensure interval times are aligned to hour boundaries
+    aggregated_results['interval_start'] = pd.to_datetime(aggregated_results['interval_start']).dt.floor('h')
+    aggregated_results['interval_end'] = pd.to_datetime(aggregated_results['interval_end']).dt.floor('h')
 
     #Add price Data
     price_history = get_price_features(config)
+
+    #TODO: delete
+    print(f"Price nrows: {price_history.shape[0]}")
+    print(f"Aggred nrows: {aggregated_results.shape[0]}")
+
+
     results_with_price = aggregated_results.merge(price_history, left_on='interval_start', right_on='datetime', how='inner')
     results_with_price.sort_values(by='datetime', inplace=True)
     print(f"Unmerged Shapes{aggregated_results.shape} x {price_history.shape} :: Merged shape: {results_with_price.shape}")
+
+    print(aggregated_results.head(2))
+    print(price_history[price_history['datetime'] > aggregated_results['interval_start'].min()].head(2))
+    print(results_with_price.head(2))
 
     # Make labels
     logger.info(f"Making {config.num_classes} labels using {config.label_strategy}.")
