@@ -71,8 +71,8 @@ class EthereumExtractionScheduler:
                 config_file=None
             )
             
-            extractor.start_date = start_time
-            extractor.end_date = end_time
+            extractor.interval_start = start_time
+            extractor.interval_end = end_time
             extractor.EXTRACTION_OBSERVATIONS_PER_INTERVAL = self.EXTRACTION_OBSERVATIONS_PER_INTERVAL
             extractor.delay = self.delay
             extractor.EXTRACTION_INTERVAL_UNIT = self.EXTRACTION_INTERVAL_UNIT
@@ -192,8 +192,8 @@ def create_scheduler_config(schedule_freq='1h', lookback_dur='1h', output_file='
     
     config = {
         'provider_url': 'https://eth.drpc.org',
-        'start_date': datetime.now() - timedelta(hours=1),
-        'end_date': datetime.now(),
+        'interval_start': datetime.now() - timedelta(hours=1),
+        'interval_end': datetime.now(),
         'observations': 10000,
         'delay': 0.05,
         'interval_type': 'hour',
@@ -202,8 +202,8 @@ def create_scheduler_config(schedule_freq='1h', lookback_dur='1h', output_file='
     }
     
     env_content = f"""ETHEREUM_PROVIDER_URL={config['provider_url']}
-START_DATE={config['start_date'].strftime('%Y-%m-%d-%H:%M')}
-END_DATE={config['end_date'].strftime('%Y-%m-%d-%H:%M')}
+INTERVAL_START={config['interval_start'].strftime('%Y-%m-%d-%H:%M')}
+INTERVAL_END={config['interval_end'].strftime('%Y-%m-%d-%H:%M')}
 EXTRACTION_OBSERVATIONS_PER_INTERVAL={config['observations']}
 DELAY_SECONDS={config['delay']}
 EXTRACTION_INTERVAL_UNIT={config['interval_type']}

@@ -117,6 +117,9 @@ def main():
                     # Wait before next check
                     logger.info(f"Next status check in {check_interval} seconds...")
                     time.sleep(check_interval)
+
+                    # Pauses exec checks to avoid rates
+                    _null_for_refresh = input("Enter to continue...")
                     
             except KeyboardInterrupt:
                 logger.warning("Received keyboard interrupt - initiating graceful shutdown")
@@ -140,23 +143,13 @@ def main():
 
             # Aggregate data from various files into a single DataFrame
             aggregate_results: pd.DataFrame = pd.DataFrame()
-            validator_results: pd.DataFrame = pd.DataFrame()
-            whale_results: pd.DataFrame = pd.DataFrame()
-
-            for file in os.listdir(data_directory):
-                if file.endswith("validator_transactions.csv"):
-                    file_path = os.path.join(data_directory, file)
-                    df = pd.read_csv(file_path)
-                    
-                    validator_results = pd.concat([validator_results, df])
-
-                elif file.endswith("whale_transactions.csv"):
-                    file_path = os.path.join(data_directory, file)
-                    df = pd.read_csv(file_path)
-                    whale_results = pd.concat([whale_results, df])
             
-            # Merge results into one 
-            aggregate_results:pd.DataFrame = pd.merge(whale_results, validator_results, 'inner', ['interval_start', 'interval_end'])
+            for file in os.listdir(data_directory):
+                df = pd.read_csv(os.path.join(data_directory, file))
+                aggregate_results = pd.concat([aggregate_results, df])
+
+            aggregate_results = aggregate_results.sort_values(by=['interval_start'])
+            aggregate_results.drop_duplicates(['interval_start'])
 
             if not aggregate_results.empty:
 

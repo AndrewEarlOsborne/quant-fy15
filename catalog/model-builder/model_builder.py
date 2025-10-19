@@ -20,7 +20,7 @@ class ModelBuilder():
             self.model = EthereumPricePredictionModel.load_model(os.path.join(self.model_dir, "eth_prediction_model"))
             self.training_data = self._load_training_data()
             self.evaluation_data = self._load_evaluation_data()
-            self.start_date, self.end_date = self._load_date_range()
+            self.interval_start, self.interval_end = self._load_date_range()
         else:
             self.model: EthereumPricePredictionModel = EthereumPricePredictionModel(
                 window_length=self.window_length,
@@ -29,8 +29,8 @@ class ModelBuilder():
             )
             self.training_data: pd.DataFrame = None
             self.evaluation_data: pd.DataFrame = None
-            self.start_date = None
-            self.end_date = None
+            self.interval_start = None
+            self.interval_end = None
 
             
     def load_data(self, data_file: str, test_train_split: float = 0.0):
@@ -51,18 +51,18 @@ class ModelBuilder():
         # Handle NaN values
         data = data.fillna(0.0)
 
-        start_date = data['datetime'].min()
-        end_date = data['datetime'].max()
+        interval_start = data['datetime'].min()
+        interval_end = data['datetime'].max()
 
-        if self.start_date is None:
-            self.start_date = start_date
+        if self.interval_start is None:
+            self.interval_start = interval_start
         else:
-            self.start_date = min(self.start_date, start_date)
+            self.interval_start = min(self.interval_start, interval_start)
 
-        if self.end_date is None:
-            self.end_date = end_date
+        if self.interval_end is None:
+            self.interval_end = interval_end
         else:
-            self.end_date = max(self.end_date, end_date)
+            self.interval_end = max(self.interval_end, interval_end)
         
         # Split into test and training sets
 

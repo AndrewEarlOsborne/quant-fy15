@@ -71,8 +71,8 @@ class Orchestrator:
         if state and 'vms' in state and vm_name in state['vms']:
             vm_info = state['vms'][vm_name]
             self.failure_logger.error(f"VM_INDEX: {vm_info.get('vm_index', 'unknown')}")
-            self.failure_logger.error(f"START_DATE: {vm_info.get('start_date', 'unknown')}")
-            self.failure_logger.error(f"END_DATE: {vm_info.get('end_date', 'unknown')}")
+            self.failure_logger.error(f"INTERVAL_START: {vm_info.get('interval_start', 'unknown')}")
+            self.failure_logger.error(f"INTERVAL_END: {vm_info.get('interval_end', 'unknown')}")
             self.failure_logger.error(f"CREATED_AT: {vm_info.get('created_at', 'unknown')}")
 
         if stdout:
@@ -92,8 +92,8 @@ class Orchestrator:
         self.project_id = os.getenv('GCP_PROJECT_ID')
         self.extraction_repo = os.getenv('EXTRACTION_REPO')
         self.extraction_repo_auth = os.getenv('EXTRACTION_REPO_AUTH', '')
-        self.start_date = os.getenv('START_DATE')
-        self.end_date = os.getenv('END_DATE')
+        self.interval_start = os.getenv('INTERVAL_START')
+        self.interval_end = os.getenv('INTERVAL_END')
         self.num_vms = int(os.getenv('NUM_VMS'))
         self.provider_url = os.getenv('ETHEREUM_PROVIDER_URLS')
         self.zone = os.getenv('GCP_ZONE', 'us-central1-a')
@@ -162,8 +162,8 @@ class Orchestrator:
             
     def _get_vm_time_range(self, vm_index: int) -> tuple:
         """Calculate time range for specific VM with hour boundary alignment."""
-        start_dt = datetime.strptime(self.start_date, '%Y-%m-%d-%H:%M')
-        end_dt = datetime.strptime(self.end_date, '%Y-%m-%d-%H:%M')
+        start_dt = datetime.strptime(self.interval_start, '%Y-%m-%d-%H:%M')
+        end_dt = datetime.strptime(self.interval_end, '%Y-%m-%d-%H:%M')
 
         # Ensure start and end dates are aligned to hour boundaries
         start_dt = start_dt.replace(minute=0, second=0, microsecond=0)
@@ -282,7 +282,7 @@ echo "Setup complete"
     def _wait_for_running_state(self, vm_name: str) -> bool:
         """Wait for VM to reach running state and SSH readiness."""
         self.logger.info(f"VM {vm_name} created, waiting for running state...")
-        max_attempts = 20
+        max_attempts = 5
 
         for attempt in range(max_attempts):
             try:
@@ -290,23 +290,8 @@ echo "Setup complete"
                 cmd = ["gcloud", "compute", "instances", "describe", vm_name,
                        "--project", self.project_id, "--zone", self.zone,
                        "--format", "value(status)", "--quiet"]
-
-                describe_success = False
-                for retry in range(3):
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-
-                    if result.returncode == 0:
-                        describe_success = True
-                        break
-                    else:
-                        if retry < 2:
-                            self.logger.warning(f"VM {vm_name} describe failed (attempt {retry + 1}/3), retrying in 2 seconds...")
-                            time.sleep(2)
-                        else:
-                            self._log_vm_failure(vm_name, "WAIT_RUNNING_STATE", result.stdout, result.stderr, result.returncode)
-
-                if not describe_success:
-                    return False
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
 
                 vm_status = result.stdout.strip()
 
@@ -322,7 +307,6 @@ echo "Setup complete"
                         ssh_result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=60)
 
                         if ssh_result.returncode == 0:
-                            self.logger.debug(f"Running SSH stdout: {ssh_result.stdout}")
                             ssh_success = True
                             break
                         else:
@@ -333,6 +317,7 @@ echo "Setup complete"
                                 self.logger.debug(f"SSH not ready for {vm_name}: stdout='{ssh_result.stdout}', stderr='{ssh_result.stderr}'")
 
                     if ssh_success:
+                        self.logger.info(f"VM {vm_name}: VM running")
                         return True
 
                 elif vm_status in ["PROVISIONING", "STAGING"]:
@@ -343,7 +328,7 @@ echo "Setup complete"
                     return False
 
             except Exception as e:
-                self.logger.error(f"Error checking VM {vm_name}: {e}")
+                self.logger.info(f"VM {vm_name}: wait_for_running_state attempt {attempt} failed. Retrying")
 
             time.sleep(60)
 
@@ -352,7 +337,7 @@ echo "Setup complete"
         
     def _make_vm_env(self, vm_index: int) -> str:
         """Create a on-vm .env file and return the file as a string."""
-        start_date, end_date = self._get_vm_time_range(vm_index)
+        interval_start, interval_end = self._get_vm_time_range(vm_index)
 
         observations_per_interval = self.vm_config['observations']
         interval_span_type = self.vm_config['interval_type']
@@ -362,13 +347,13 @@ echo "Setup complete"
 # Ethereum Extraction Pipeline Config
 # ===================================
 ETHEREUM_PROVIDER_URL=https://eth.drpc.org
-PROVIDER_FETCH_DELAY_SECONDS=0.05
+PROVIDER_FETCH_DELAY_SECONDS=0.07
 
 # ===================================
 # Extraction Parameters
 # ===================================
-START_DATE={start_date}
-END_DATE={end_date}
+INTERVAL_START={interval_start}
+INTERVAL_END={interval_end}
 OBSERVATIONS_PER_INTERVAL={observations_per_interval}
 INTERVAL_SPAN_TYPE={interval_span_type}
 INTERVAL_SPAN_LENGTH={interval_span_length}
@@ -393,7 +378,6 @@ DATA_DIRECTORY=data
             
             if success:
                 self.logger.info(f"Screen session started successfully on {vm_name}")
-                self.logger.debug(f"SSH stdout: {ssh_result.stdout}")
             else:
                 self._log_vm_failure(vm_name, "START_EXTRACTION", ssh_result.stdout, ssh_result.stderr, ssh_result.returncode)
                 
@@ -423,7 +407,7 @@ DATA_DIRECTORY=data
                         self.logger.warning(f"VM {vm_name} status check describe failed (attempt {retry + 1}/3), retrying in 2 seconds...")
                         time.sleep(2)
                     else:
-                        self._log_vm_failure(vm_name, "STATUS_CHECK", result.stdout, result.stderr, result.returncode)
+                        self.logger.debug(f"VM {vm_name} status check failed after 3 retries: {result.stderr.strip()}")
 
             if not describe_success:
                 return "failed"
@@ -451,36 +435,59 @@ DATA_DIRECTORY=data
                     break
                 else:
                     if retry < 2:
-                        self.logger.warning(f"VM {vm_name} SSH status check failed (attempt {retry + 1}/3), retrying in 2 seconds...")
-                        time.sleep(2)
+                        self.logger.debug(f"VM {vm_name} SSH status check failed (attempt {retry + 1}/3), retrying in 5 seconds...")
+                        time.sleep(5)
                     else:
-                        self.logger.debug(f"SSH status check failed for {vm_name}: stdout='{ssh_result.stdout}', stderr='{ssh_result.stderr}'")
+                        self.logger.debug(f"SSH status check failed for {vm_name} after 3 retries")
 
             if ssh_success:
-                status_text = ssh_result.stdout.strip()
+                status_text = ssh_result.stdout.strip().lower()
 
                 self.logger.debug(f"VM {vm_name} status: {status_text}")
 
-                if status_text == "COMPLETED":
+                if "completed" in status_text:
+                    state = self._load_state_file()
+                    expected_intervals = None
+                    if state and 'vms' in state and vm_name in state['vms']:
+                        last_status = state['vms'][vm_name].get('last_status', '')
+                        expected_intervals = self._extract_total_intervals(last_status)
+
                     self.logger.info(f"VM {vm_name} completed - collecting and stopping")
-                    self._get_results(vm_name)
+                    self._get_results(vm_name, expected_intervals)
                     self._delete_vm(vm_name)
-                    return "completed"
-                elif status_text in ["ERROR", "NO_STATUS"]:
+                    return f"completed {expected_intervals}/{expected_intervals}" if expected_intervals else "completed"
+                elif "error" in status_text:
                     return "failed"
-                elif status_text == ["STARTING"]:
+                elif 'no_status' in status_text:
+                    return "no_staus"
+                elif 'starting' in status_text:
+                    state = self._load_state_file()
+                    if state and 'vms' in state and vm_name in state['vms']:
+                        state['vms'][vm_name]['last_status'] = status_text
+                        self._save_state_file(state)
                     return "running"
-                else:
+                elif "running" in status_text:
                     if "/" in status_text and status_text.replace("/", "").replace(" ", "").isdigit():
+                        state = self._load_state_file()
+                        if state and 'vms' in state and vm_name in state['vms']:
+                            state['vms'][vm_name]['last_status'] = status_text
+                            self._save_state_file(state)
                         return f"running {status_text}"
-                    else:
-                        return "running"
-            else:
-                return "running"
+                else:
+                    self.logger.info(f"Unable to interpret status for {vm_name}: '{status_text}'")
+                    return "no_status"
 
         except Exception as e:
             self.logger.error(f"Failed to get status for {vm_name}: {e}")
-            return "failed"
+            return "NO_STATUS"
+
+    def _extract_total_intervals(self, status_text: str) -> Optional[int]:
+        """Extract total number of intervals from status text like 'COMPLETED' or '5/10'."""
+        if "/" in status_text:
+            parts = status_text.split("/")
+            if len(parts) == 2 and parts[1].strip().isdigit():
+                return int(parts[1].strip())
+        return None
             
     def _delete_vm(self, vm_name: str) -> None:
         """Stop a VM instance."""
@@ -495,8 +502,6 @@ DATA_DIRECTORY=data
             success = result.returncode == 0 or "was not found" in result.stderr
             if success:
                 self.logger.info(f"VM {vm_name} stopped")
-                if result.stdout.strip():
-                    self.logger.debug(f"Stop VM stdout: {result.stdout}")
 
                 # Remove VM from state file
                 state = self._load_state_file()
@@ -533,8 +538,8 @@ DATA_DIRECTORY=data
                     "project_id": self.project_id,
                     "zone": self.zone,
                     "num_vms": self.num_vms,
-                    "start_date": self.start_date,
-                    "end_date": self.end_date
+                    "interval_start": self.interval_start,
+                    "interval_end": self.interval_end
                 }
             }
             
@@ -548,7 +553,7 @@ DATA_DIRECTORY=data
 
             status = True
 
-            with ThreadPoolExecutor(max_workers=min(5, self.num_vms)) as executor:
+            with ThreadPoolExecutor(max_workers=min(8, self.num_vms)) as executor:
                 # Submit VM creation tasks
                 futures = {}
                 attempted_names = {}
@@ -556,18 +561,18 @@ DATA_DIRECTORY=data
                     vm_name:str = self._get_next_vm_name(attempted_names)
                     attempted_names[vm_name] = "Starting"
 
-                    future = executor.submit(self._deploy_single_vm, vm_name, i)
+                    future = executor.submit(self._deploy_vm, vm_name, i)
                     futures[future] = vm_name
                     
                     # Add to state immediately
-                    vm_start_date, vm_end_date = self._get_vm_time_range(i)
+                    vm_interval_start, vm_interval_end = self._get_vm_time_range(i)
                     state['vms'][vm_name] = {
                         "status": "initialized",
                         "created_at": datetime.now().isoformat(),
                         "processed_at": None,
                         "vm_index": i,
-                        "start_date": vm_start_date,
-                        "end_date": vm_end_date
+                        "interval_start": vm_interval_start,
+                        "interval_end": vm_interval_end
                     }
 
                     attempted_names[vm_name] = "Started"
@@ -604,55 +609,50 @@ DATA_DIRECTORY=data
         except Exception as e:
             self.logger.error(f"Build failed: {e}")
 
-    def _deploy_single_vm(self, vm_name: str, vm_index: int) -> bool:
+    def _deploy_vm(self, vm_name: str, vm_index: int) -> bool:
         """Deploy a single VM through complete lifecycle."""
         try:
             # Step 1: Initialize VM
             if not self._initialize_vm(vm_name, vm_index):
                 return False
                 
-            # # Step 2: Execute startup script (synchronous setup)
-            # if not self._execute_startup_script(vm_name, vm_index):
-            #     self.logger.error(f"Failed to run startup {vm_name}")
-            #     return False
-                
             # Step 3: Run start script in screen session
-            if not self._start_extraction_screen(vm_name):
-                self.logger.error(f"Failed to start extraction on {vm_name}")
-                return False
-                
-            # VM is now running with extraction started
-            self.logger.info(f"VM {vm_name} fully deployed and running")
-            return True
+            if self._start_extraction_screen(vm_name):
+                return True
             
         except Exception as e:
-            self.logger.error(f"Single VM deployment failed for {vm_name}: {e}")
-            return False
+            self.logger.error(f"VM deployment failed for {vm_name}: {e}")
+
+        return False
 
     def check_status(self) -> Dict:
         """Get status of each VM as a simple dict."""
         try:
             state = self._load_state_file()
-            if not state or not state.get('vms'):
-                self.logger.info("Check status: No active deployment found")
-                return {"completed": True, "no_deployment": True}
-                
+            if not state:
+                raise ValueError("No Deployment found")
+            if not state.get('vms'):
+                raise ValueError("Deployment is Empty")
+
             # Get status of all VMs
             vm_statuses = {"completed": True}
+
             for vm_name in state['vms'].keys():
                 status = self._get_vm_status(vm_name)
 
-                vm_statuses[vm_name] = status
+                if status != "NO_STATUS":
+                    vm_statuses[vm_name] = status
 
-                self.logger.debug(f"    VM {vm_name} Status: {status}")
-                
+                # if "running" in status and "/" in status:
+                #     self.logger.info(f"VM {vm_name} Status: {status}")
+
                 if not status == "completed":
                     vm_statuses["completed"] = False
-                
+
             return vm_statuses
-            
+
         except Exception as e:
-            self.logger.error(f"Status check exception: {e}")
+            self.logger.error(f"Status check exception in {vm_name}: {e}")
             return {"completed": False}
 
     def cleanup(self) -> Dict:
@@ -704,80 +704,54 @@ DATA_DIRECTORY=data
             return {"status": "cleanup_failed", "error": str(e)}
         
 
-    def _get_results(self, vm_name: str) -> None:
+    def _get_results(self, vm_name: str, expected_intervals: Optional[int] = None) -> None:
         """Download CSV files from VM's extractor/data directory to local data/vm_results directory."""
         try:
-            self.logger.info(f"Downloading results from VM: {vm_name}")
+            remote_file_path = "extractor/data/aggregated_results.csv"
             
-            # First, list all CSV files in the VM's extractor/data directory
-            list_cmd = [
-                "gcloud", "compute", "ssh", vm_name,
-                "--project", self.project_id, "--zone", self.zone,
-                "--command", "find extractor/data -name '*.csv' -type f",
-                "--quiet"
-            ]
-            
-            list_result = subprocess.run(list_cmd, capture_output=True, text=True, timeout=60)
-            if list_result.returncode != 0:
-                self._log_vm_failure(vm_name, "FILE_LISTING", list_result.stdout, list_result.stderr, list_result.returncode)
-                return
-            
-            files_to_download = [f.strip() for f in list_result.stdout.strip().split('\n') if f.strip()]
-            
-            if not files_to_download:
-                self.logger.warning(f"No CSV files found on {vm_name}")
-                return
-            
-            self.logger.info(f"Found {len(files_to_download)} files to download from {vm_name}")
+            self.logger.info(f"VM {vm_name}: get_results - downloading file: {remote_file_path}")
 
             # Track total observations across all files from this VM
             total_observations = 0
 
-            # Download each file individually to preserve filenames
-            for remote_file_path in files_to_download:
-                # Extract just the filename from the full path
-                filename = os.path.basename(remote_file_path)
-                local_file_path = os.path.join(self.data_dir, filename)
+            local_file_path = os.path.join(self.data_dir, f"{self.interval_start.lower()}_{vm_name.lower()}_aggregated_results.csv")
 
-                # Backup existing file if it exists
-                backup_path = local_file_path + '.backup'
-                if os.path.exists(local_file_path):
-                    os.rename(local_file_path, backup_path)
+            # Use SCP to download the file with retry logic
+            scp_cmd = [
+                "gcloud", "compute", "scp",
+                "--project", self.project_id, "--zone", self.zone,
+                f"{vm_name}:{remote_file_path}",
+                local_file_path,
+                "--quiet"
+            ]
 
-                # Use SCP to download the file
-                scp_cmd = [
-                    "gcloud", "compute", "scp",
-                    "--project", self.project_id, "--zone", self.zone,
-                    f"{vm_name}:{remote_file_path}",
-                    local_file_path,
-                    "--quiet"
-                ]
+            max_retries = 3
+            retry_delay = 2
+            scp_success = False
 
+            for retry in range(max_retries):
                 scp_result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=300)
 
                 if scp_result.returncode == 0:
-
-                    if filename.endswith('.csv'):
-                        df = pd.read_csv(local_file_path)
-                        if len(df) == 0 and os.path.exists(backup_path):
-                            os.rename(backup_path, local_file_path)
-                            continue
-                        elif os.path.exists(backup_path):
-                            os.remove(backup_path)
-
-                        self.logger.info(f"Downloaded {filename} from {vm_name}")
-                    elif os.path.exists(backup_path):
-                        os.remove(backup_path)
+                    scp_success = True
+                    break
                 else:
-                    if os.path.exists(backup_path):
-                        os.rename(backup_path, local_file_path)
-                    self._log_vm_failure(vm_name, f"FILE_DOWNLOAD_{filename}", scp_result.stdout, scp_result.stderr, scp_result.returncode)
+                    if retry <= max_retries - 1:
+                        wait_time = retry_delay * (2 ** retry)
+                        self.logger.warning(f"SCP download failed for {vm_name} (attempt {retry + 1}/{max_retries}), retrying in {wait_time}s...")
+                        self.logger.debug(f"SCP Fail: {scp_result.stderr}")
+                        time.sleep(wait_time)
 
-            # Log total observations for this VM
+            if scp_success:
+                if os.path.exists(local_file_path):
+                    self.logger.info(f"SCP successful for {vm_name}, file exists at {local_file_path}")
+                    
             if total_observations > 0:
-                self.logger.info(f"Completed downloading results from {vm_name} - Total: {total_observations} observations")
+                summary = f"{total_observations}/{expected_intervals}" if expected_intervals else str(total_observations)
+                self.logger.info(f"Completed downloading results from {vm_name} - Total: {summary} observations")
+
             else:
                 self.logger.info(f"Completed downloading results from {vm_name}")
-            
+
         except Exception as e:
             self.logger.error(f"Failed to get results from {vm_name}: {e}")

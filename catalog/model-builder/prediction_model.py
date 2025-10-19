@@ -58,13 +58,13 @@ class TqdmCallback(tf.keras.callbacks.Callback):
 from tscv import *
 
 
-def get_historical_prices(start_date, end_date, interval='1h'):
+def get_historical_prices(interval_start, interval_end, interval='1h'):
     """
     Load historical ETH-USD price data from local CSV and return price changes.
 
     Args:
-        start_date (str or datetime): Start date for price data
-        end_date (str or datetime): End date for price data
+        interval_start (str or datetime): Start date for price data
+        interval_end (str or datetime): End date for price data
         interval (str): Price interval ('1d', '1h', etc.) - currently ignored, using available data
 
     Returns:
@@ -72,15 +72,15 @@ def get_historical_prices(start_date, end_date, interval='1h'):
     """
     try:
         # Convert dates to datetime if needed
-        if isinstance(start_date, str):
-            start_dt = pd.to_datetime(start_date)
+        if isinstance(interval_start, str):
+            start_dt = pd.to_datetime(interval_start)
         else:
-            start_dt = pd.to_datetime(start_date)
+            start_dt = pd.to_datetime(interval_start)
 
-        if isinstance(end_date, str):
-            end_dt = pd.to_datetime(end_date)
+        if isinstance(interval_end, str):
+            end_dt = pd.to_datetime(interval_end)
         else:
-            end_dt = pd.to_datetime(end_date)
+            end_dt = pd.to_datetime(interval_end)
 
         # Load data from local CSV file
         price_history_path = os.getenv('PRICE_HISTORY_PATH', 'data/price_history/ETH_UDS_AUG17_TO_SEPT25.csv')
@@ -816,9 +816,9 @@ class EthereumPricePredictionModel:
 
         # Fetch historical price changes
         try:
-            start_date = pd.to_datetime(predictions_df['interval_start'].min())
-            end_date = pd.to_datetime(predictions_df['interval_start'].max())
-            price_deltas = get_historical_prices(start_date, end_date, interval='1d')
+            interval_start = pd.to_datetime(predictions_df['interval_start'].min())
+            interval_end = pd.to_datetime(predictions_df['interval_start'].max())
+            price_deltas = get_historical_prices(interval_start, interval_end, interval='1d')
 
         except Exception as e:
             print(f"Warning: Could not fetch price data, using synthetic returns: {e}")
