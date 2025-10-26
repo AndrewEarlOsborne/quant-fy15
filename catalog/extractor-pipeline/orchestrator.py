@@ -317,7 +317,7 @@ echo "Setup complete"
                                 self.logger.debug(f"SSH not ready for {vm_name}: stdout='{ssh_result.stdout}', stderr='{ssh_result.stderr}'")
 
                     if ssh_success:
-                        self.logger.info(f"VM {vm_name}: VM running")
+                        self.logger.info(f"VM {vm_name}: GCP instance running and SSH ready")
                         return True
 
                 elif vm_status in ["PROVISIONING", "STAGING"]:
@@ -415,11 +415,13 @@ DATA_DIRECTORY=data
             vm_status = result.stdout.strip()
 
             if vm_status in ["PROVISIONING", "STAGING"]:
+                self.logger.debug(f"VM {vm_name}: GCP instance state is {vm_status}")
                 return "starting"
             elif vm_status != "RUNNING":
-                self.logger.error(f"VM {vm_name} in unexpected state: {vm_status}")
+                self.logger.error(f"VM {vm_name}: GCP instance in unexpected state: {vm_status}")
                 return "failed"
 
+            self.logger.debug(f"VM {vm_name}: GCP instance RUNNING, checking extraction status")
             # SSH status check with retry logic
             ssh_cmd = ["gcloud", "compute", "ssh", vm_name,
                       "--project", self.project_id, "--zone", self.zone,
@@ -443,7 +445,7 @@ DATA_DIRECTORY=data
             if ssh_success:
                 status_text = ssh_result.stdout.strip().lower()
 
-                self.logger.debug(f"VM {vm_name} status: {status_text}")
+                self.logger.debug(f"VM {vm_name}: Extraction status from status.txt: {status_text}")
 
                 if "completed" in status_text:
                     state = self._load_state_file()
@@ -452,15 +454,21 @@ DATA_DIRECTORY=data
                         last_status = state['vms'][vm_name].get('last_status', '')
                         expected_intervals = self._extract_total_intervals(last_status)
 
-                    self.logger.info(f"VM {vm_name} completed - collecting and stopping")
-                    self._get_results(vm_name, expected_intervals)
-                    self._delete_vm(vm_name)
+                    self.logger.info(f"VM {vm_name}: Extraction completed - collecting results and stopping VM")
+                    scp_success = self._get_results(vm_name, expected_intervals)
+                    if scp_success:
+                        self._delete_vm(vm_name)
+                    else:
+                        self.logger.warning(f"VM {vm_name}: SCP failed - VM will not be stopped for manual investigation")
                     return f"completed {expected_intervals}/{expected_intervals}" if expected_intervals else "completed"
                 elif "error" in status_text:
+                    self.logger.warning(f"VM {vm_name}: Extraction reported error status")
                     return "failed"
                 elif 'no_status' in status_text:
-                    return "no_staus"
+                    self.logger.debug(f"VM {vm_name}: No status file found yet")
+                    return "no_status"
                 elif 'starting' in status_text:
+                    self.logger.debug(f"VM {vm_name}: Extraction starting")
                     state = self._load_state_file()
                     if state and 'vms' in state and vm_name in state['vms']:
                         state['vms'][vm_name]['last_status'] = status_text
@@ -468,18 +476,22 @@ DATA_DIRECTORY=data
                     return "running"
                 elif "running" in status_text:
                     if "/" in status_text and status_text.replace("/", "").replace(" ", "").isdigit():
+                        self.logger.debug(f"VM {vm_name}: Extraction in progress: {status_text}")
                         state = self._load_state_file()
                         if state and 'vms' in state and vm_name in state['vms']:
                             state['vms'][vm_name]['last_status'] = status_text
                             self._save_state_file(state)
                         return f"running {status_text}"
                 else:
-                    self.logger.info(f"Unable to interpret status for {vm_name}: '{status_text}'")
+                    self.logger.info(f"VM {vm_name}: Unable to interpret extraction status: '{status_text}'")
                     return "no_status"
+            else:
+                self.logger.warning(f"VM {vm_name} SSH status check failed after retries")
+                return "ssh_failed"
 
         except Exception as e:
             self.logger.error(f"Failed to get status for {vm_name}: {e}")
-            return "NO_STATUS"
+            return "error"
 
     def _extract_total_intervals(self, status_text: str) -> Optional[int]:
         """Extract total number of intervals from status text like 'COMPLETED' or '5/10'."""
@@ -635,20 +647,15 @@ DATA_DIRECTORY=data
                 raise ValueError("Deployment is Empty")
 
             # Get status of all VMs
-            vm_statuses = {"completed": True}
+            vm_statuses = {}
 
             for vm_name in state['vms'].keys():
                 status = self._get_vm_status(vm_name)
+                vm_statuses[vm_name] = status
 
-                if status != "NO_STATUS":
-                    vm_statuses[vm_name] = status
+                    
 
-                # if "running" in status and "/" in status:
-                #     self.logger.info(f"VM {vm_name} Status: {status}")
-
-                if not status == "completed":
-                    vm_statuses["completed"] = False
-
+            
             return vm_statuses
 
         except Exception as e:
@@ -704,11 +711,15 @@ DATA_DIRECTORY=data
             return {"status": "cleanup_failed", "error": str(e)}
         
 
-    def _get_results(self, vm_name: str, expected_intervals: Optional[int] = None) -> None:
-        """Download CSV files from VM's extractor/data directory to local data/vm_results directory."""
+    def _get_results(self, vm_name: str, expected_intervals: Optional[int] = None) -> bool:
+        """Download CSV files from VM's extractor/data directory to local data/vm_results directory.
+
+        Returns:
+            bool: True if SCP was successful, False otherwise
+        """
         try:
             remote_file_path = "extractor/data/aggregated_results.csv"
-            
+
             self.logger.info(f"VM {vm_name}: get_results - downloading file: {remote_file_path}")
 
             # Track total observations across all files from this VM
@@ -745,13 +756,18 @@ DATA_DIRECTORY=data
             if scp_success:
                 if os.path.exists(local_file_path):
                     self.logger.info(f"SCP successful for {vm_name}, file exists at {local_file_path}")
-                    
+
             if total_observations > 0:
                 summary = f"{total_observations}/{expected_intervals}" if expected_intervals else str(total_observations)
                 self.logger.info(f"Completed downloading results from {vm_name} - Total: {summary} observations")
-
-            else:
+            elif scp_success:
                 self.logger.info(f"Completed downloading results from {vm_name}")
+            else:
+                self.logger.error(f"SCP failed for {vm_name} after {max_retries} retries")
+                self._log_vm_failure(vm_name, "SCP_DOWNLOAD", scp_result.stdout, scp_result.stderr, scp_result.returncode)
+
+            return scp_success
 
         except Exception as e:
             self.logger.error(f"Failed to get results from {vm_name}: {e}")
+            return False
