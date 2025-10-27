@@ -5,5 +5,8 @@ __pycache__/
 **/__pycache__/
 *.pyc
 data/
-.DS_Store
+**/.DS_Store
 CLAUDE.md
+
+
+models/

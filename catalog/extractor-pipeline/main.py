@@ -18,19 +18,17 @@ import pandas as pd
 import os
 
 from orchestrator import Orchestrator
-            
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)-8s - %(name)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 
 def main():
     """Enhanced controller demonstrating robust Orchestrator usage with error handling."""
-    
-    # Setup comprehensive logging
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s - %(levelname)-8s - %(name)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    logger = logging.getLogger(__name__)
     
     orchestrator = None
     
@@ -132,40 +130,7 @@ def main():
         logger.info("=== CLEANUP PHASE ===")
         orchestrator.cleanup()
 
-        logger.info("=== DATA ENGINEERING PHASE ===")
-
-        try:
-            data_directory = "data/vm_results"
-            output_file_dir = "data/aggregated"
-
-            # Create output directory if it doesn't exist
-            os.makedirs(output_file_dir, exist_ok=True)
-
-            # Aggregate data from various files into a single DataFrame
-            aggregate_results: pd.DataFrame = pd.DataFrame()
-            
-            for file in os.listdir(data_directory):
-                df = pd.read_csv(os.path.join(data_directory, file))
-                aggregate_results = pd.concat([aggregate_results, df])
-
-            aggregate_results = aggregate_results.sort_values(by=['interval_start'])
-            aggregate_results.drop_duplicates(['interval_start'])
-
-            if not aggregate_results.empty:
-
-                output_filename = f"{str(aggregate_results.iloc[0]['interval_start'])}_{str(aggregate_results.iloc[-1]['interval_start'])}_aggregated.csv"
-
-                ordered_results = aggregate_results[['interval_start','interval_end','whale_count','whale_avg_value_eth','whale_total_value_eth','validator_count','validator_total_value_eth','validator_avg_value_eth','validator_avg_gas_price']]
-                ordered_results = ordered_results.sort_values(["interval_start"])
-
-                output_path = os.path.join(output_file_dir, output_filename)
-                ordered_results.to_csv(output_path, index=False)
-                logger.info("Data aggregation completed successfully.")
-            else:
-                logger.warning("No transaction data files found to aggregate")
-
-        except Exception as e:
-            logger.error(f"Data aggregation failed: {e}")
+        aggregate_data()
 
     except KeyboardInterrupt:
         logger.warning("=== KEYBOARD INTERRUPT RECEIVED ===")
@@ -177,5 +142,47 @@ def main():
         logger.error(f"Error details: {e}")
 
 
+def aggregate_data():
+
+    logger.info("=== DATA ENGINEERING PHASE ===")
+
+    try:
+        data_directory = "data/vm_results"
+        output_file_dir = "data/aggregated"
+
+        # Create output directory if it doesn't exist
+        os.makedirs(output_file_dir, exist_ok=True)
+
+        # Aggregate data from various files into a single DataFrame
+        aggregate_results: pd.DataFrame = pd.DataFrame()
+        
+        for file in os.listdir(data_directory):
+            if not file.endswith(".csv"):
+                continue
+            print(f"Processing: {file}")
+            df = pd.read_csv(os.path.join(data_directory, file))
+            aggregate_results = pd.concat([aggregate_results, df])
+
+        aggregate_results = aggregate_results.sort_values(by=['interval_start'])
+        aggregate_results.drop_duplicates(['interval_start'])
+
+        if not aggregate_results.empty:
+
+            output_filename = f"{str(aggregate_results.iloc[0]['interval_start'])}_{str(aggregate_results.iloc[-1]['interval_start'])}_aggregated.csv"
+
+            ordered_results = aggregate_results[['interval_start','interval_end','whale_count','whale_avg_value_eth','whale_total_value_eth','validator_count','validator_total_value_eth','validator_avg_value_eth','validator_avg_gas_price']]
+            ordered_results = ordered_results.sort_values(["interval_start"])
+
+            output_path = os.path.join(output_file_dir, output_filename)
+            ordered_results.to_csv(output_path, index=False)
+            logger.info("Data aggregation completed successfully.")
+        else:
+            logger.warning("No transaction data files found to aggregate")
+
+    except Exception as e:
+        logger.error(f"Data aggregation failed: {e}")
+
+
 if __name__ == "__main__":
     main()
+    

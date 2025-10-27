@@ -2,12 +2,12 @@ import os
 import pickle
 import joblib
 import time
+import logging
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import tensorflow as tf
-from datetime import datetime, timedelta
 from tqdm import tqdm
 
 
@@ -17,12 +17,21 @@ from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from keras.optimizers import AdamW
 from keras.regularizers import l2
 
-from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, f1_score
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 from sklearn.utils.class_weight import compute_class_weight
 from xgboost import XGBClassifier
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 class TqdmCallback(tf.keras.callbacks.Callback):
@@ -294,88 +303,80 @@ class EthereumPricePredictionModel:
         return Model(input_layer, outputs, name=model_type)
     
     def _train_keras_model(self, model, X, y_train,
-                          epochs=100, batch_size=64, model_name="Model"):
-        """Train Keras model with time series cross-validation"""
-        train_preds = np.zeros(len(y_train))
+                          epochs=50, batch_size=64, model_name="Model", train_split=0.8):
+        """Train Keras model with train/validation split"""
 
-        tscv = TimeSeriesSplit(n_splits = self.num_classes)
-        total_folds = self.num_classes
+        split_idx = int(len(X) * train_split)
+        X_tr = X[:split_idx]
+        X_val = X[split_idx:]
+        y_tr = y_train[:split_idx]
+        y_val = y_train[split_idx:]
 
-        for fold_idx, (train_idx, val_idx) in enumerate(tscv.split(X)):
-            fold_num = fold_idx + 1
-            fold_start_time = time.time()
+        logger.info(f"{model_name} - Training on {len(X_tr)} samples, validating on {len(X_val)} samples")
 
-            X_tr = X[train_idx]
-            X_val = X[val_idx]
-            y_tr, y_val = y_train[train_idx], y_train[val_idx]
+        model.compile(
+            optimizer=AdamW(learning_rate=0.001),
+            loss='sparse_categorical_crossentropy',
+            metrics=['accuracy']
+        )
 
-            model_fold = tf.keras.models.clone_model(model)
-            model_fold.compile(
-                optimizer=AdamW(learning_rate=0.0005),
-                loss='sparse_categorical_crossentropy',
-                metrics=['accuracy']
-            )
+        classes_present = np.unique(y_tr)
+        class_weights = compute_class_weight('balanced',
+                                           classes=classes_present, y=y_tr)
+        class_weight_dict = dict(zip(classes_present, class_weights))
 
-            class_weights = compute_class_weight('balanced',
-                                               classes=np.unique(y_tr), y=y_tr)
-            class_weight_dict = dict(enumerate(class_weights))
+        logger.debug(f"{model_name} - Classes present: {classes_present}, weights: {class_weight_dict}")
 
-            tqdm_callback = TqdmCallback(fold_num, total_folds, model_name)
+        tqdm_callback = TqdmCallback(1, 1, model_name)
 
-            model_fold.fit(
-                X_tr, y_tr,
-                epochs=epochs,
-                batch_size=batch_size,
-                validation_data=(X_val, y_val),
-                callbacks=[
-                    EarlyStopping(monitor='val_loss', patience=10,
-                                restore_best_weights=True, verbose=0),
-                    ReduceLROnPlateau(monitor='val_loss', factor=0.5,
-                                    patience=5, verbose=0),
-                    tqdm_callback
-                ],
-                class_weight=class_weight_dict,
-                verbose=0
-            )
+        training_start = time.time()
+        model.fit(
+            X_tr, y_tr,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_data=(X_val, y_val),
+            callbacks=[
+                EarlyStopping(monitor='val_loss', patience=15,
+                            restore_best_weights=True, verbose=0),
+                ReduceLROnPlateau(monitor='val_loss', factor=0.5,
+                                patience=5, verbose=0),
+                tqdm_callback
+            ],
+            class_weight=class_weight_dict,
+            verbose=0
+        )
 
-            fold_time = time.time() - fold_start_time
-            print(f"    Fold {fold_num} completed in {fold_time:.1f}s")
+        training_time = time.time() - training_start
+        print(f"    Training completed in {training_time:.1f}s")
 
-            train_preds[val_idx] = np.argmax(model_fold.predict(X_val, verbose=0), axis=1)
+        train_preds = np.argmax(model.predict(X, verbose=0), axis=1)
+        logger.debug(f"{model_name} - Training predictions unique: {np.unique(train_preds, return_counts=True)}")
 
         return train_preds
     
-    def _train_sklearn_model(self, model, X, y, model_name="Sklearn Model"):
-        """Train sklearn model given an X, y pair with time series cross-validation"""
-        train_preds = np.zeros(len(y))
-        test_preds_list = []
+    def _train_sklearn_model(self, model, X, y, model_name="Sklearn Model", train_split=0.8):
+        """Train sklearn model with train/validation split"""
 
-        tscv = TimeSeriesSplit(n_splits = self.num_classes)
-        total_folds = self.num_classes
+        split_idx = int(len(X) * train_split)
+        X_tr = X[:split_idx].reshape(split_idx, -1)
+        X_val = X[split_idx:].reshape(len(X) - split_idx, -1)
+        y_tr = y[:split_idx]
 
-        fold_pbar = tqdm(enumerate(tscv.split(X)), total=total_folds,
-                         desc=f"{model_name} Training", leave=False)
+        logger.info(f"{model_name} - Training on {len(X_tr)} samples, validating on {len(X_val)} samples")
 
-        for fold_idx, (train_idx, val_idx) in fold_pbar:
-            fold_num = fold_idx + 1
-            fold_start_time = time.time()
+        training_start = time.time()
 
-            X_tr = X[train_idx].reshape(len(train_idx), -1)
-            X_val = X[val_idx].reshape(len(val_idx), -1)
-            y_tr = y[train_idx]
-            y_val = y[val_idx]
+        pbar = tqdm(total=1, desc=f"{model_name} Training", leave=False)
+        model.fit(X_tr, y_tr)
+        pbar.update(1)
+        pbar.close()
 
-            model.fit(X_tr, y_tr)
-            train_preds[val_idx] = model.predict(X_val)
-            test_preds_list.append(model.predict(X.reshape(len(X), -1)))
+        training_time = time.time() - training_start
+        print(f"    Training completed in {training_time:.1f}s")
 
-            fold_time = time.time() - fold_start_time
-            fold_pbar.set_postfix({
-                'fold': f'{fold_num}/{total_folds}',
-                'time': f'{fold_time:.1f}s'
-            })
+        train_preds = model.predict(X.reshape(len(X), -1))
+        logger.debug(f"{model_name} - Training predictions unique: {np.unique(train_preds, return_counts=True)}")
 
-        fold_pbar.close()
         return train_preds
     
     
@@ -403,7 +404,7 @@ class EthereumPricePredictionModel:
         X_data = X_data.apply(pd.to_numeric, errors='coerce').fillna(0.0).astype('float32')
         X = X_data.values
 
-        y_train = data['label'].values
+        y_train = data['label'].astype(int).values
 
         # Store feature structure for later use
         self.feature_columns = list(self.feature_columns)
@@ -420,7 +421,7 @@ class EthereumPricePredictionModel:
 
         # Training progress
         print("\n" + "="*60)
-        print("ETHEREUM TRADING MODEL TRAINING")
+        print("MODEL TRAINING")
         print("="*60)
 
         training_start_time = time.time()
@@ -468,6 +469,12 @@ class EthereumPricePredictionModel:
             tcn_train_preds, transformer_train_preds, xgb_train_preds
         ))
 
+        logger.debug(f"Meta-training - TCN preds unique: {np.unique(tcn_train_preds, return_counts=True)}")
+        logger.debug(f"Meta-training - Transformer preds unique: {np.unique(transformer_train_preds, return_counts=True)}")
+        logger.debug(f"Meta-training - XGBoost preds unique: {np.unique(xgb_train_preds, return_counts=True)}")
+        logger.debug(f"Meta-training - y_train unique: {np.unique(y_train, return_counts=True)}")
+        logger.debug(f"Meta-training - First 20 meta features:\n{train_meta_features[:20]}")
+
         # Initialize and train meta-classifier
         if self.meta_classifier == 'rf':
             self.meta_model = RandomForestClassifier(
@@ -484,6 +491,8 @@ class EthereumPricePredictionModel:
             )
 
         self.meta_model.fit(train_meta_features, y_train)
+
+        logger.debug(f"Meta-model fitted. Classes: {self.meta_model.classes_ if hasattr(self.meta_model, 'classes_') else 'N/A'}")
         stage_time = time.time() - stage_start
         print(f"Meta-classifier training completed in {stage_time:.1f}s")
         main_pbar.update(1)
@@ -525,17 +534,26 @@ class EthereumPricePredictionModel:
         X = X_data.values
 
         # Get base model predictions
-        tcn_preds = np.argmax(self.tcn_model.predict(X, verbose=0), axis=1)
-        transformer_preds = np.argmax(
-            self.transformer_model.predict(X, verbose=0), axis=1
-        )
+        tcn_probs = self.tcn_model.predict(X, verbose=0)
+        tcn_preds = np.argmax(tcn_probs, axis=1)
+        logger.debug(f"TCN predictions - min: {tcn_preds.min()}, max: {tcn_preds.max()}, mean: {tcn_preds.mean():.2f}, median: {np.median(tcn_preds)}, unique: {np.unique(tcn_preds, return_counts=True)}")
+
+        transformer_probs = self.transformer_model.predict(X, verbose=0)
+        transformer_preds = np.argmax(transformer_probs, axis=1)
+        logger.debug(f"Transformer predictions - min: {transformer_preds.min()}, max: {transformer_preds.max()}, mean: {transformer_preds.mean():.2f}, median: {np.median(transformer_preds)}, unique: {np.unique(transformer_preds, return_counts=True)}")
 
         # XGBoost uses the same flat features
         xgb_preds = self.xgb_model.predict(X)
+        logger.debug(f"XGBoost predictions - min: {xgb_preds.min()}, max: {xgb_preds.max()}, mean: {xgb_preds.mean():.2f}, median: {np.median(xgb_preds)}, unique: {np.unique(xgb_preds, return_counts=True)}, classes: {self.xgb_model.classes_}")
 
         # Create meta-features and predict
         meta_features = np.column_stack((tcn_preds, transformer_preds, xgb_preds))
+        logger.debug(f"Meta features shape: {meta_features.shape}, first 10 rows:\n{meta_features[:10]}")
+
         final_predictions = self.meta_model.predict(meta_features)
+        logger.debug(f"Final predictions - min: {final_predictions.min()}, max: {final_predictions.max()}, mean: {final_predictions.mean():.2f}, median: {np.median(final_predictions)}, unique: {np.unique(final_predictions, return_counts=True)}, dtype: {final_predictions.dtype}")
+        if hasattr(self.meta_model, 'classes_'):
+            logger.debug(f"Meta-model classes: {self.meta_model.classes_}")
 
         return final_predictions
     
@@ -559,8 +577,21 @@ class EthereumPricePredictionModel:
         X = data[feature_cols]
         y = data['label']
 
+        logger.debug(f"Raw label dtype: {y.dtype}, first 10 values: {y.head(10).values}")
+
+        # Convert categorical labels to integers for consistent comparison
+        y = y.astype(int)
+
+        logger.debug(f"After conversion - label dtype: {y.dtype}, min: {y.min()}, max: {y.max()}, mean: {y.mean():.2f}, median: {np.median(y)}")
+        logger.debug(f"True labels unique: {np.unique(y, return_counts=True)}")
+
         # Generate predictions - pass DataFrame directly
         predictions = self.predict(X)
+
+        # Debug: Check prediction and label ranges
+        print(f"DEBUG - True labels: min={y.min()}, max={y.max()}, unique={sorted(y.unique())}")
+        print(f"DEBUG - Predictions: min={predictions.min()}, max={predictions.max()}, unique={sorted(np.unique(predictions))}")
+        logger.debug(f"Predictions mean: {predictions.mean():.2f}, median: {np.median(predictions)}")
 
         # Calculate classification metrics
         accuracy = accuracy_score(y, predictions)

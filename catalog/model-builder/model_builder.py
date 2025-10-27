@@ -15,7 +15,7 @@ class ModelBuilder():
 
         self.model_dir = os.path.expanduser('data/model')
 
-        if os.path.isdir(self.model_dir):
+        if os.path.exists(os.path.join(self.model_dir, "/*")):
             print(f"Loading existing model from {self.model_dir}")
             self.model = EthereumPricePredictionModel.load_model(os.path.join(self.model_dir, "eth_prediction_model"))
             self.training_data = self._load_training_data()
