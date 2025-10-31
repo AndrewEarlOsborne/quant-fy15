@@ -1,6 +1,5 @@
 import os
 import pickle
-from datetime import datetime
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from prediction_model import EthereumPricePredictionModel
@@ -10,10 +9,9 @@ class ModelBuilder():
 
         self.prediction_interval = os.getenv('PREDICTION_INTERVAL', '1d')
         self.num_classes = int(os.getenv('MODEL_NUM_CLASSES', '3'))
-        self.investment_rate = float(os.getenv('TRADER_INVESTMENT_RATE', '1.0'))
         self.window_length = int(os.getenv('MODEL_WINDOW_LENGTH', '14'))
 
-        self.model_dir = os.path.expanduser('data/model')
+        self.model_dir = os.path.expanduser('models')
 
         if os.path.exists(os.path.join(self.model_dir, "/*")):
             print(f"Loading existing model from {self.model_dir}")
@@ -25,7 +23,6 @@ class ModelBuilder():
             self.model: EthereumPricePredictionModel = EthereumPricePredictionModel(
                 window_length=self.window_length,
                 num_classes=self.num_classes,
-                investment_rate=self.investment_rate
             )
             self.training_data: pd.DataFrame = None
             self.evaluation_data: pd.DataFrame = None
@@ -63,11 +60,14 @@ class ModelBuilder():
             self.interval_end = interval_end
         else:
             self.interval_end = max(self.interval_end, interval_end)
-        
-        # Split into test and training sets
+
+        # Temporal split: sort by datetime and split chronologically
+        data = data.sort_values('datetime').reset_index(drop=True)
 
         if test_train_split > 0:
-            train, test = train_test_split(data, test_size=test_train_split, shuffle=False)
+            split_idx = int(len(data) * (1 - test_train_split))
+            train = data.iloc[:split_idx]
+            test = data.iloc[split_idx:]
         else:
             train = data
             test = pd.DataFrame()

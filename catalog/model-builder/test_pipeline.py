@@ -22,15 +22,15 @@ config = DataConfig(
 )
 
 complete_data:pd.DataFrame = engineer_features(config)
-show_label_distribution(complete_data) ## Needs data, label values
+# show_label_distribution(complete_data) ## Needs data, label values
 
 # Save to csv for loading
 complete_data.to_csv(cleaned_data_file, header=True, index=False)
 
-# # Initial data ingestion of engineered data
+# Initial data ingestion of engineered data
 # model_builder.load_data(cleaned_data_file, test_train_split=0.2)
 
-# # Train model
+# Train model
 model_builder.load_data(cleaned_data_file, 0.2)
 model_builder.train()
 

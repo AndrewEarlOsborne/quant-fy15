@@ -35,10 +35,6 @@ def engineer_features(config: DataConfig) -> DataFrame:
     #Add price Data
     price_history = get_price_features(config)
 
-    #TODO: delete
-    print(f"Price nrows: {price_history.shape[0]}")
-    print(f"Aggred nrows: {aggregated_results.shape[0]}")
-
 
     results_with_price = aggregated_results.merge(price_history, left_on='interval_start', right_on='datetime', how='inner')
     results_with_price.sort_values(by='datetime', inplace=True)
@@ -52,10 +48,6 @@ def engineer_features(config: DataConfig) -> DataFrame:
     logger.info(f"Making {config.num_classes} labels using {config.label_strategy}.")
     labeled_data:pd.DataFrame = make_labels(results_with_price.copy(), config.num_classes, config.label_strategy)
 
-    #TODO: delete
-    print(f"Labeled nrows: {labeled_data.shape[0]}")
-
-    # TODO: volume
     # results_with_price['volume_m_avg'] = results_with_price['volume'].rolling(window=config.window_length, min_periods=1).mean()
 
     # Define which features should be windowed and kept features
@@ -71,19 +63,19 @@ def engineer_features(config: DataConfig) -> DataFrame:
         if col in features_to_use:
             # feature_data.append(labeled_data[feature].values)
             X_features.append(col)
-            print(f"Feature {col} -- included")
+            # print(f"Feature {col} -- included")
 
-        elif col in ['label', 'delta']:
-            print(f"Feature {col} -- excluded (label or target)")
+        # elif col in ['label', 'delta']:
+        #     print(f"Feature {col} -- excluded (label or target)")
 
-        else:
-            print(f"Feature {col} -- excluded")
+        # else:
+        #     print(f"Feature {col} -- excluded")
+        #     pass
 
     # Select features and build windows.
     labeled_data = labeled_data[X_features + ['label', 'delta']]
 
-    #TODO: delete
-    print(f"Engineered nrows: {labeled_data.shape[0]}")
+    # print(f"Engineered nrows: {labeled_data.shape[0]}")
 
     windowed_features = ['delta', 'validator_count', 'whale_avg_value_eth']
     result_df = build_window_features(labeled_data, windowed_features, config.window_length)
@@ -118,7 +110,7 @@ def get_price_features(config) -> DataFrame:
     # Convert to datetime and truncate to hour level for consistent matching
     print(f"Loaded {hist_data.shape[0]} records from local price history")
 
-    # TODO: handle other data sources
+
     column_mapping = {
         'Open time': 'datetime',
         # 'Volume': 'volume',
@@ -240,15 +232,24 @@ def show_label_distribution(data:pd.DataFrame):
     unique_labels = sorted(df['label'].unique())
     colors = plt.cm.Set3(np.linspace(0, 1, len(unique_labels)))
 
-    data_min, data_max = df['delta_pct'].min(), df['delta_pct'].max()
+    # Filter to middle 80% of data (drop outer 10% on each side)
+    sorted_deltas = df['delta_pct'].sort_values()
+    lower_percentile = sorted_deltas.quantile(0.10)
+    upper_percentile = sorted_deltas.quantile(0.90)
+    df_filtered = df[(df['delta_pct'] >= lower_percentile) & (df['delta_pct'] <= upper_percentile)]
+
+    print(f"Filtered to middle 80% of data: {len(df_filtered)} of {len(df)} samples")
+    print(f"Range: [{lower_percentile:.4f}, {upper_percentile:.4f}]")
+
+    data_min, data_max = df_filtered['delta_pct'].min(), df_filtered['delta_pct'].max()
     bins = np.linspace(data_min, data_max, 51)
     bin_centers = (bins[:-1] + bins[1:]) / 2
     bin_width = bins[1] - bins[0]
 
-    # Calculate histogram data for each label
+    # Calculate histogram data for each label using filtered data
     label_counts = {}
     for label in unique_labels:
-        label_data = df[df['label'] == label]['delta_pct']
+        label_data = df_filtered[df_filtered['label'] == label]['delta_pct']
         counts, _ = np.histogram(label_data, bins=bins)
         label_counts[label] = counts
 

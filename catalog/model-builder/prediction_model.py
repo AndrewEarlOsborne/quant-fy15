@@ -2,7 +2,6 @@ import os
 import pickle
 import joblib
 import time
-import logging
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -17,21 +16,12 @@ from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from keras.optimizers import AdamW
 from keras.regularizers import l2
 
-from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, f1_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
+from sklearn.linear_model import SGDClassifier
 from sklearn.utils.class_weight import compute_class_weight
 from xgboost import XGBClassifier
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 
 class TqdmCallback(tf.keras.callbacks.Callback):
@@ -128,8 +118,7 @@ class EthereumPricePredictionModel:
     Ethereum price prediction model using stacking ensemble of TCN, Transformer, and XGBoost.
     """
     
-    def __init__(self, num_classes, window_length=14, meta_classifier='xgb', 
-                 investment_rate=1.0, random_seed=42):
+    def __init__(self, num_classes, window_length=14, meta_classifier='xgb',  random_seed=1234):
         """
         Initialize the prediction model.
         
@@ -143,8 +132,8 @@ class EthereumPricePredictionModel:
         self.window_length = window_length
         self.num_classes: int = num_classes
         self.meta_classifier = meta_classifier
-        self.investment_rate = investment_rate
         self.random_seed = random_seed
+        self.interval_size = '1h' ## TODO: migrate to point to ENV
         
         # Set random seeds
         tf.random.set_seed(random_seed)
@@ -169,7 +158,7 @@ class EthereumPricePredictionModel:
             prev_x = x
             if x.shape[-1] != filters:
                 prev_x = Conv1D(filters, kernel_size=1, padding='same',
-                               kernel_regularizer=l2(0.01))(prev_x)
+                               kernel_regularizer=l2(0.1))(prev_x)
 
             conv1 = Conv1D(filters, kernel_size, dilation_rate=dilation_rate,
                           padding='causal', kernel_regularizer=l2(0.01))(x)
@@ -281,29 +270,35 @@ class EthereumPricePredictionModel:
 
         return Model(inputs, outputs, name="Transformer")
 
-    def _build_flat_model(self, model_type):
-        """Build a simple dense neural network for flat features"""
+    def _build_flat_tcn(self):
+        """Build TCN with a flat input layer"""
         input_layer = Input(shape=(self.num_features,), name='flat_input')
 
-        if model_type == "TCN":
-            # Dense layers mimicking TCN structure
-            x = Dense(64, activation='relu', kernel_regularizer=l2(0.01))(input_layer)
-            x = Dropout(0.3)(x)
-            x = Dense(32, activation='relu', kernel_regularizer=l2(0.01))(x)
-            x = Dropout(0.3)(x)
-        else:  # Transformer
-            # Dense layers mimicking Transformer structure
-            x = Dense(64, activation='relu', kernel_regularizer=l2(0.01))(input_layer)
-            x = Dropout(0.3)(x)
-            x = Dense(32, activation='relu', kernel_regularizer=l2(0.01))(x)
-            x = Dropout(0.3)(x)
+        # Dense layers mimicking TCN structure
+        x = Dense(64, activation='relu', kernel_regularizer=l2(0.01))(input_layer)
+        x = Dropout(0.3)(x)
+        x = Dense(32, activation='relu', kernel_regularizer=l2(0.01))(x)
+        x = Dropout(0.3)(x)
 
         outputs = Dense(self.num_classes, activation='softmax', kernel_regularizer=l2(0.01))(x)
 
-        return Model(input_layer, outputs, name=model_type)
+        return Model(input_layer, outputs, name="TCN")
+
+    def _build_flat_transformer(self):
+        """Build Transformer with a flat input layer"""
+        input_layer = Input(shape=(self.num_features,), name='flat_input')
+        # Dense layers mimicking
+        x = Dense(64, activation='relu', kernel_regularizer=l2(0.01))(input_layer)
+        x = Dropout(0.3)(x)
+        x = Dense(32, activation='relu', kernel_regularizer=l2(0.01))(x)
+        x = Dropout(0.3)(x)
+
+        outputs = Dense(self.num_classes, activation='softmax', kernel_regularizer=l2(0.01))(x)
+
+        return Model(input_layer, outputs, name="TCN")
     
     def _train_keras_model(self, model, X, y_train,
-                          epochs=50, batch_size=64, model_name="Model", train_split=0.8):
+                          epochs=100, batch_size=64, model_name="Model", train_split=0.8):
         """Train Keras model with train/validation split"""
 
         split_idx = int(len(X) * train_split)
@@ -311,8 +306,6 @@ class EthereumPricePredictionModel:
         X_val = X[split_idx:]
         y_tr = y_train[:split_idx]
         y_val = y_train[split_idx:]
-
-        logger.info(f"{model_name} - Training on {len(X_tr)} samples, validating on {len(X_val)} samples")
 
         model.compile(
             optimizer=AdamW(learning_rate=0.001),
@@ -325,8 +318,6 @@ class EthereumPricePredictionModel:
                                            classes=classes_present, y=y_tr)
         class_weight_dict = dict(zip(classes_present, class_weights))
 
-        logger.debug(f"{model_name} - Classes present: {classes_present}, weights: {class_weight_dict}")
-
         tqdm_callback = TqdmCallback(1, 1, model_name)
 
         training_start = time.time()
@@ -338,8 +329,6 @@ class EthereumPricePredictionModel:
             callbacks=[
                 EarlyStopping(monitor='val_loss', patience=15,
                             restore_best_weights=True, verbose=0),
-                ReduceLROnPlateau(monitor='val_loss', factor=0.5,
-                                patience=5, verbose=0),
                 tqdm_callback
             ],
             class_weight=class_weight_dict,
@@ -349,35 +338,28 @@ class EthereumPricePredictionModel:
         training_time = time.time() - training_start
         print(f"    Training completed in {training_time:.1f}s")
 
-        train_preds = np.argmax(model.predict(X, verbose=0), axis=1)
-        logger.debug(f"{model_name} - Training predictions unique: {np.unique(train_preds, return_counts=True)}")
-
-        return train_preds
+        train_preds = np.argmax(model.predict(X_tr, verbose=0), axis=1)
+        val_preds = np.argmax(model.predict(X_val, verbose=0), axis=1)
+        return train_preds, val_preds
     
     def _train_sklearn_model(self, model, X, y, model_name="Sklearn Model", train_split=0.8):
         """Train sklearn model with train/validation split"""
 
         split_idx = int(len(X) * train_split)
         X_tr = X[:split_idx].reshape(split_idx, -1)
-        X_val = X[split_idx:].reshape(len(X) - split_idx, -1)
         y_tr = y[:split_idx]
-
-        logger.info(f"{model_name} - Training on {len(X_tr)} samples, validating on {len(X_val)} samples")
+        X_val = X[split_idx:].reshape(len(X) - split_idx, -1)
 
         training_start = time.time()
 
-        pbar = tqdm(total=1, desc=f"{model_name} Training", leave=False)
         model.fit(X_tr, y_tr)
-        pbar.update(1)
-        pbar.close()
 
         training_time = time.time() - training_start
         print(f"    Training completed in {training_time:.1f}s")
 
-        train_preds = model.predict(X.reshape(len(X), -1))
-        logger.debug(f"{model_name} - Training predictions unique: {np.unique(train_preds, return_counts=True)}")
-
-        return train_preds
+        train_preds = model.predict(X_tr)
+        val_preds = model.predict(X_val)
+        return train_preds, val_preds
     
     
     def train(self, data):
@@ -402,9 +384,12 @@ class EthereumPricePredictionModel:
         # Extract all features as flat data
         X_data = data[self.feature_columns]
         X_data = X_data.apply(pd.to_numeric, errors='coerce').fillna(0.0).astype('float32')
-        X = X_data.values
+        X_train = X_data.values
 
         y_train = data['label'].astype(int).values
+
+        print("Validate Inputs")
+        print(f"Mean label: {np.mean(y_train)}")
 
         # Store feature structure for later use
         self.feature_columns = list(self.feature_columns)
@@ -412,8 +397,8 @@ class EthereumPricePredictionModel:
 
         # Initialize models with flat feature structure
         print("Initializing models...")
-        self.tcn_model = self._build_flat_model("TCN")
-        self.transformer_model = self._build_flat_model("Transformer")
+        self.tcn_model = self._build_flat_tcn()
+        self.transformer_model = self._build_flat_transformer()
         self.xgb_model = XGBClassifier(
             n_estimators=100, max_depth=5, learning_rate=0.2,
             random_state=self.random_seed
@@ -425,57 +410,51 @@ class EthereumPricePredictionModel:
         print("="*60)
 
         training_start_time = time.time()
-        stages = ["TCN", "Transformer", "XGBoost", "Meta-Classifier"]
 
         # Overall training progress bar
         main_pbar = tqdm(total=4, desc="Overall Training Progress", position=0, leave=True)
 
-        # Stage 1: TCN Training
-        print(f"\n[1/4] Training TCN Model...")
+        # TCN Training
         stage_start = time.time()
-        tcn_train_preds = self._train_keras_model(
-            self.tcn_model, X, y_train, model_name="TCN"
+        tcn_train_preds, tcn_val_preds = self._train_keras_model(
+            self.tcn_model, X_train, y_train, model_name="TCN", epochs=100
         )
         stage_time = time.time() - stage_start
-        print(f"TCN training completed in {stage_time:.1f}s")
         main_pbar.update(1)
 
-        # Stage 2: Transformer Training
-        print(f"\n[2/4] Training Transformer Model...")
+        # Transformer Training
         stage_start = time.time()
-        transformer_train_preds = self._train_keras_model(
-            self.transformer_model, X, y_train, model_name="Transformer"
+        transformer_train_preds, transformer_val_preds = self._train_keras_model(
+            self.transformer_model, X_train, y_train, model_name="Transformer", epochs=100
         )
         stage_time = time.time() - stage_start
-        print(f"Transformer training completed in {stage_time:.1f}s")
         main_pbar.update(1)
 
-        # Stage 3: XGBoost Training
-        print(f"\n[3/4] Training XGBoost Model...")
-        stage_start = time.time()
-        xgb_train_preds = self._train_sklearn_model(
-            self.xgb_model, X, y_train, model_name="XGBoost"
+        # XGBoost Training
+        xgb_train_preds, xgb_val_preds = self._train_sklearn_model(
+            self.xgb_model, X_train, y_train, model_name="XGBoost"
         )
-        stage_time = time.time() - stage_start
-        print(f"XGBoost training completed in {stage_time:.1f}s")
+
         main_pbar.update(1)
 
-        # Stage 4: Meta-Classifier Training
-        print(f"\n[4/4] Training Meta-Classifier...")
-        stage_start = time.time()
+        # Meta-Classifier Training
 
-        # Create meta-features
+        # Create meta-features from training split only
         train_meta_features = np.column_stack((
             tcn_train_preds, transformer_train_preds, xgb_train_preds
         ))
 
-        logger.debug(f"Meta-training - TCN preds unique: {np.unique(tcn_train_preds, return_counts=True)}")
-        logger.debug(f"Meta-training - Transformer preds unique: {np.unique(transformer_train_preds, return_counts=True)}")
-        logger.debug(f"Meta-training - XGBoost preds unique: {np.unique(xgb_train_preds, return_counts=True)}")
-        logger.debug(f"Meta-training - y_train unique: {np.unique(y_train, return_counts=True)}")
-        logger.debug(f"Meta-training - First 20 meta features:\n{train_meta_features[:20]}")
+        # Create meta-features from validation split
+        val_meta_features = np.column_stack((
+            tcn_val_preds, transformer_val_preds, xgb_val_preds
+        ))
 
-        # Initialize and train meta-classifier
+        # Get split index to separate train/val labels
+        split_idx = int(len(y_train) * 0.8)
+        y_train_split = y_train[:split_idx]
+        y_val_split = y_train[split_idx:]
+
+        # Initialize and train meta-classifier on training split only
         if self.meta_classifier == 'rf':
             self.meta_model = RandomForestClassifier(
                 n_estimators=100, max_depth=10, random_state=self.random_seed
@@ -490,19 +469,26 @@ class EthereumPricePredictionModel:
                 random_state=self.random_seed
             )
 
-        self.meta_model.fit(train_meta_features, y_train)
+        self.meta_model.fit(train_meta_features, y_train_split)
 
-        logger.debug(f"Meta-model fitted. Classes: {self.meta_model.classes_ if hasattr(self.meta_model, 'classes_') else 'N/A'}")
-        stage_time = time.time() - stage_start
-        print(f"Meta-classifier training completed in {stage_time:.1f}s")
         main_pbar.update(1)
 
         main_pbar.close()
-        total_time = time.time() - training_start_time
 
         print("\n" + "="*60)
-        print(f"TRAINING COMPLETED IN {total_time:.1f}s")
+        print(f"TRAINING COMPLETED IN {time.time() - training_start_time:.1f}s")
         print("="*60)
+
+        # Store validation predictions for training confusion matrix
+        val_predictions = self.meta_model.predict(val_meta_features)
+        self.training_predictions = val_predictions
+        self.training_labels = y_val_split
+
+        print(f"\nTraining split size: {len(y_train_split)} ({len(y_train_split)/len(y_train)*100:.1f}%)")
+        print(f"Validation split size: {len(y_val_split)} ({len(y_val_split)/len(y_train)*100:.1f}%)")
+        print(f"Training labels distribution: {dict(zip(*np.unique(y_train_split, return_counts=True)))}")
+        print(f"Validation labels distribution: {dict(zip(*np.unique(y_val_split, return_counts=True)))}")
+        print(f"Validation predictions distribution: {dict(zip(*np.unique(val_predictions, return_counts=True)))}")
 
         self.is_trained = True
         
@@ -535,25 +521,34 @@ class EthereumPricePredictionModel:
 
         # Get base model predictions
         tcn_probs = self.tcn_model.predict(X, verbose=0)
+        print(f"DEBUG: tcn probs{np.mean(tcn_probs)}")
         tcn_preds = np.argmax(tcn_probs, axis=1)
-        logger.debug(f"TCN predictions - min: {tcn_preds.min()}, max: {tcn_preds.max()}, mean: {tcn_preds.mean():.2f}, median: {np.median(tcn_preds)}, unique: {np.unique(tcn_preds, return_counts=True)}")
+
+        # print(f"DEGUG: TCN mean prediction: {np.mean(tcn_preds)}")
+        tcn_counts = np.unique_counts(tcn_preds)
+        print(f"DEGUG: TCN predictions: {list(zip(tcn_counts.values, tcn_counts.counts))}")
 
         transformer_probs = self.transformer_model.predict(X, verbose=0)
         transformer_preds = np.argmax(transformer_probs, axis=1)
-        logger.debug(f"Transformer predictions - min: {transformer_preds.min()}, max: {transformer_preds.max()}, mean: {transformer_preds.mean():.2f}, median: {np.median(transformer_preds)}, unique: {np.unique(transformer_preds, return_counts=True)}")
+
+        # print(f"DEGUG: Transformer mean prediction: {np.mean(transformer_preds)}")
+        tf_counts = np.unique_counts(transformer_preds)
+        print(f"DEGUG: Transformer predictions: {list(zip(tf_counts.values, tf_counts.counts))}")
 
         # XGBoost uses the same flat features
         xgb_preds = self.xgb_model.predict(X)
-        logger.debug(f"XGBoost predictions - min: {xgb_preds.min()}, max: {xgb_preds.max()}, mean: {xgb_preds.mean():.2f}, median: {np.median(xgb_preds)}, unique: {np.unique(xgb_preds, return_counts=True)}, classes: {self.xgb_model.classes_}")
+
+        xgb_counts = np.unique_counts(xgb_preds)
+        print(f"DEGUG: XGB predictions: {list(zip(xgb_counts.values, xgb_counts.counts))}")
 
         # Create meta-features and predict
         meta_features = np.column_stack((tcn_preds, transformer_preds, xgb_preds))
-        logger.debug(f"Meta features shape: {meta_features.shape}, first 10 rows:\n{meta_features[:10]}")
-
+        # meta_features = np.zeros(meta_features.shape) # Confirm model is correctly fitting - shows that 0 correctly fails to predict
         final_predictions = self.meta_model.predict(meta_features)
-        logger.debug(f"Final predictions - min: {final_predictions.min()}, max: {final_predictions.max()}, mean: {final_predictions.mean():.2f}, median: {np.median(final_predictions)}, unique: {np.unique(final_predictions, return_counts=True)}, dtype: {final_predictions.dtype}")
-        if hasattr(self.meta_model, 'classes_'):
-            logger.debug(f"Meta-model classes: {self.meta_model.classes_}")
+
+        print(f"DEBUG: Meta mean: {np.mean(final_predictions)}")
+        meta_counts = np.unique_counts(final_predictions)
+        print(f"DEGUG: FINAL predictions: {list(zip(meta_counts.values, meta_counts.counts))}")
 
         return final_predictions
     
@@ -568,60 +563,63 @@ class EthereumPricePredictionModel:
         Returns:
             dict: Comprehensive evaluation metrics
         """
+        print("\n" + "="*60)
+        print("EVALUATION DIAGNOSTICS")
+        print("="*60)
+
         # Extract features and labels from evaluation data
         label_cols = ['label']
         feature_cols = [col for col in data.columns if col not in label_cols]
 
-        print(f"Feature Cols in Predictor.eval: {feature_cols}")
-
         X = data[feature_cols]
-        y = data['label']
+        y = data['label'].astype(int)
 
-        logger.debug(f"Raw label dtype: {y.dtype}, first 10 values: {y.head(10).values}")
-
-        # Convert categorical labels to integers for consistent comparison
-        y = y.astype(int)
-
-        logger.debug(f"After conversion - label dtype: {y.dtype}, min: {y.min()}, max: {y.max()}, mean: {y.mean():.2f}, median: {np.median(y)}")
-        logger.debug(f"True labels unique: {np.unique(y, return_counts=True)}")
+        print(f"Evaluation data shape: {data.shape}")
+        print(f"Feature columns: {len(feature_cols)}")
+        print(f"Evaluation labels distribution: {dict(zip(*np.unique(y, return_counts=True)))}")
 
         # Generate predictions - pass DataFrame directly
         predictions = self.predict(X)
 
-        # Debug: Check prediction and label ranges
-        print(f"DEBUG - True labels: min={y.min()}, max={y.max()}, unique={sorted(y.unique())}")
-        print(f"DEBUG - Predictions: min={predictions.min()}, max={predictions.max()}, unique={sorted(np.unique(predictions))}")
-        logger.debug(f"Predictions mean: {predictions.mean():.2f}, median: {np.median(predictions)}")
+        print(f"Evaluation predictions distribution: {dict(zip(*np.unique(predictions, return_counts=True)))}")
 
         # Calculate classification metrics
         accuracy = accuracy_score(y, predictions)
         f1_weighted = f1_score(y, predictions, average='weighted')
         f1_macro = f1_score(y, predictions, average='macro')
 
-        if show_results:
-            # Create plots with specified requirements
-            plt.figure(figsize=(12, 8))
+        # Calculate confusion matrices
+        cm_eval = confusion_matrix(y, predictions)
 
-            # Plot confusion matrix
-            cm = confusion_matrix(y, predictions)
-            plt.subplot(2, 2, 1)
-            class_names = [f'Class {i}' for i in range(self.num_classes)]
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                       xticklabels=class_names, yticklabels=class_names)
-            plt.title('Confusion Matrix')
-            plt.xlabel('Predicted Label')
-            plt.ylabel('True Label')
+        if hasattr(self, 'training_labels') and hasattr(self, 'training_predictions'):
+            cm_train = confusion_matrix(self.training_labels, self.training_predictions)
+            val_accuracy = accuracy_score(self.training_labels, self.training_predictions)
+            val_f1_weighted = f1_score(self.training_labels, self.training_predictions, average='weighted')
+            val_f1_macro = f1_score(self.training_labels, self.training_predictions, average='macro')
 
-            # Plot prediction distribution
-            plt.subplot(2, 2, 2)
-            unique, counts = np.unique(predictions, return_counts=True)
-            plt.bar(unique, counts, alpha=0.7, color='skyblue')
-            plt.title('Prediction Distribution')
-            plt.xlabel('Predicted Class')
-            plt.ylabel('Count')
+            print(f"\nValidation Split Performance (20% of training data):")
+            print(f"  Size: {len(self.training_labels)}")
+            print(f"  Labels distribution: {dict(zip(*np.unique(self.training_labels, return_counts=True)))}")
+            print(f"  Predictions distribution: {dict(zip(*np.unique(self.training_predictions, return_counts=True)))}")
+            print(f"  Accuracy: {val_accuracy:.4f}")
+            print(f"  F1 (Weighted): {val_f1_weighted:.4f}")
+            print(f"  F1 (Macro): {val_f1_macro:.4f}")
 
-            plt.tight_layout()
-            plt.show()
+            # Per-class accuracy
+            val_per_class_acc = cm_train.diagonal() / cm_train.sum(axis=1)
+            print(f"  Per-class Accuracy: {', '.join([f'Class {i}: {acc:.4f}' for i, acc in enumerate(val_per_class_acc)])}")
+        else:
+            cm_train = None
+
+        print(f"\nEvaluation Performance (held-out test data):")
+        print(f"  Size: {len(y)}")
+        print(f"  Accuracy: {accuracy:.4f}")
+        print(f"  F1 (Weighted): {f1_weighted:.4f}")
+        print(f"  F1 (Macro): {f1_macro:.4f}")
+
+        # Per-class accuracy
+        eval_per_class_acc = cm_eval.diagonal() / cm_eval.sum(axis=1)
+        print(f"  Per-class Accuracy: {', '.join([f'Class {i}: {acc:.4f}' for i, acc in enumerate(eval_per_class_acc)])}")
 
         # Backtesting analysis
         predictions_df = pd.DataFrame({
@@ -629,42 +627,131 @@ class EthereumPricePredictionModel:
             'label': predictions
         })
 
-        model_return, benchmark_return = self.display_backtesting_results(predictions_df)
+        backtest_metrics = self.display_backtesting_results(predictions_df)
 
-        self.display_backtesting_results(predictions_df[-30:])
+        if show_results:
+            # Create unified 2x3 visualization
+            fig = plt.figure(figsize=(18, 10))
+
+            # [0,0] Validation Confusion Matrix (from training phase)
+            ax1 = plt.subplot(2, 3, 1)
+            if cm_train is not None:
+                class_names = [f'Class {i}' for i in range(self.num_classes)]
+                sns.heatmap(cm_train, annot=True, fmt='d', cmap='Greens',
+                           xticklabels=class_names, yticklabels=class_names, ax=ax1)
+                ax1.set_title('Validation Confusion Matrix\n(from training phase)')
+                ax1.set_xlabel('Predicted Label')
+                ax1.set_ylabel('True Label')
+            else:
+                ax1.text(0.5, 0.5, 'Validation data not available', ha='center', va='center')
+                ax1.set_title('Validation Confusion Matrix')
+
+            # [0,1] Evaluation Confusion Matrix
+            ax2 = plt.subplot(2, 3, 2)
+            class_names = [f'Class {i}' for i in range(self.num_classes)]
+            sns.heatmap(cm_eval, annot=True, fmt='d', cmap='Blues',
+                       xticklabels=class_names, yticklabels=class_names, ax=ax2)
+            ax2.set_title('Evaluation Confusion Matrix')
+            ax2.set_xlabel('Predicted Label')
+            ax2.set_ylabel('True Label')
+
+            # [0,2] Metrics Summary Text Box
+            ax3 = plt.subplot(2, 3, 3)
+            ax3.axis('off')
+
+            # Calculate validation metrics
+            if hasattr(self, 'training_labels') and hasattr(self, 'training_predictions'):
+                val_accuracy = accuracy_score(self.training_labels, self.training_predictions)
+                val_f1_weighted = f1_score(self.training_labels, self.training_predictions, average='weighted')
+                val_size = len(self.training_labels)
+
+                # Calculate per-class accuracy for validation
+                val_cm = confusion_matrix(self.training_labels, self.training_predictions)
+                val_per_class_acc = val_cm.diagonal() / val_cm.sum(axis=1)
+            else:
+                val_accuracy = None
+                val_f1_weighted = None
+                val_size = 0
+                val_per_class_acc = []
+
+            # Calculate per-class accuracy for evaluation
+            eval_cm = cm_eval
+            eval_per_class_acc = eval_cm.diagonal() / eval_cm.sum(axis=1)
+
+            metrics_text = f"""
+EVALUATION METRICS
+{'='*30}
+
+Validation (20% of training):
+  Size: {val_size}
+  Accuracy: {val_accuracy:.4f}
+  F1 (Weighted): {val_f1_weighted:.4f}
+  Per-class Acc: {', '.join([f'{acc:.2f}' for acc in val_per_class_acc])}
+
+Evaluation (held-out test):
+  Size: {len(y)}
+  Accuracy: {accuracy:.4f}
+  F1 (Weighted): {f1_weighted:.4f}
+  F1 (Macro): {f1_macro:.4f}
+  Per-class Acc: {', '.join([f'{acc:.2f}' for acc in eval_per_class_acc])}
+
+Backtesting:
+  Model Return: {backtest_metrics['model_return']:.2f}%
+  Benchmark Return: {backtest_metrics['benchmark_return']:.2f}%
+  Sharpe Ratio: {backtest_metrics['sharpe_ratio']:.2f}
+  Invested: {backtest_metrics['percent_invested']:.1f}% of time
+"""
+            ax3.text(0.1, 0.95, metrics_text, transform=ax3.transAxes,
+                    fontsize=10, verticalalignment='top', fontfamily='monospace',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+
+            # [1,0] Validation Prediction Distribution (from training phase)
+            ax4 = plt.subplot(2, 3, 4)
+            if hasattr(self, 'training_predictions'):
+                unique, counts = np.unique(self.training_predictions, return_counts=True)
+                ax4.bar(unique, counts, alpha=0.7, color='lightgreen', edgecolor='darkgreen')
+                ax4.set_title('Validation Prediction Distribution\n(from training phase)')
+                ax4.set_xlabel('Predicted Class')
+                ax4.set_ylabel('Count')
+                ax4.grid(True, alpha=0.3, axis='y')
+            else:
+                ax4.text(0.5, 0.5, 'Validation predictions not available', ha='center', va='center')
+                ax4.set_title('Validation Prediction Distribution')
+
+            # [1,1] Backtesting Full Period
+            ax5 = plt.subplot(2, 3, 5)
+
+            # [1,2] Backtesting Last 30 Intervals
+            ax6 = plt.subplot(2, 3, 6)
+
+            # Re-run backtesting to populate plots
+            self.display_backtesting_results(predictions_df, ax_full=ax5, ax_recent=ax6)
+
+            plt.tight_layout()
+            plt.show()
 
         # Compile comprehensive results
         results = {
             'accuracy': accuracy,
             'f1_score_weighted': f1_weighted,
             'f1_score_macro': f1_macro,
-            'confusion_matrix': cm,
-            # 'classification_report': class_report,
+            'confusion_matrix_eval': cm_eval,
+            'confusion_matrix_train': cm_train,
             'predictions': predictions,
             'y_true': y.values,
-            'model_return': model_return,
-            'backtest_return': benchmark_return
+            'backtest_metrics': backtest_metrics
         }
-
-        if show_results:
-            print(f"\n=== Model Evaluation Results ===")
-            print(f"Evaluation size: {len(y)}")
-            print(f"Accuracy: {accuracy:.4f}")
-            print(f"F1 Score (Weighted): {f1_weighted:.4f}")
-            print(f"F1 Score (Macro): {f1_macro:.4f}")
-            print(f"Backtest Return: {model_return:.2f}%")
-            print(f"Benchmark Return: {benchmark_return:.2f}%")
 
         return results
     
-    def display_backtesting_results(self, predictions_df, plot_results=False):
+    def display_backtesting_results(self, predictions_df, ax_full=None, ax_recent=None):
         """
         Calculate returns from trading strategy based on predictions.
 
         Args:
             predictions_df (pd.DataFrame): DataFrame with 'interval_start' and 'label' columns
-            y_true (pd.Series): True labels for backtesting validation
-            plot_results (bool): Whether to plot the results
+            ax_full (matplotlib.axes.Axes): Axes for full backtest plot (optional)
+            ax_recent (matplotlib.axes.Axes): Axes for recent backtest plot (optional)
         """
         backtesting_df = self.calculate_historical_backtesting(predictions_df)
 
@@ -678,45 +765,52 @@ class EthereumPricePredictionModel:
 
         # Calculate additional metrics
         interval_returns = np.diff(model_capital) / np.array(model_capital[:-1])
-        benchmark_interval_returns = np.diff(benchmark_capital) / np.array(benchmark_capital[:-1])
+        benchmark_interval_deltas = np.diff(benchmark_capital) / np.array(benchmark_capital[:-1])
 
         avg_interval_return = np.mean(interval_returns) * 100
+        avg_benchmark_return = np.mean(benchmark_interval_deltas) * 100
+        
         volatility = np.std(interval_returns) * 100
         sharpe_ratio = avg_interval_return / volatility if volatility > 0 else 0
 
-        # Calculate maximum drawdown
-        peak = np.maximum.accumulate(model_capital)
-        drawdown = (np.array(model_capital) - peak) / peak
-        max_drawdown = np.min(drawdown) * 100
+        percent_days_invested = (np.sum(np.array(did_invest) != False) / len(did_invest)) * 100
 
-        percent_days_invested = (np.sum(np.array(did_invest) != 0) / len(did_invest)) * 100
-        win_rate = np.sum(np.array(interval_returns) > 0) / len(interval_returns) * 100
+        # Create plots if axes provided
+        if ax_full is not None:
+            ax_full.plot(model_capital, label='Model Strategy', color='blue', linewidth=2)
+            ax_full.plot(benchmark_capital, label='Buy & Hold', color='black',
+                        linestyle='--', linewidth=2)
+            ax_full.set_title(f'Trading Strategy Performance\n'
+                             f'Model: {final_model_return:.2f}% | Benchmark: {final_benchmark_return:.2f}% | Sharpe: {sharpe_ratio:.2f}')
+            ax_full.set_xlabel('Intervals Elapsed')
+            ax_full.set_ylabel('Portfolio Value')
+            ax_full.grid(True, alpha=0.3)
+            ax_full.legend()
 
-        if plot_results:
-            plt.figure(figsize=(12, 8))
-
-            # Main strategy comparison plot (Benchmark)
-            plt.subplot(2, 2, 3)
-            plt.plot(model_capital, label='Model Strategy', color='blue', linewidth=2)
-            plt.plot(benchmark_capital, label='Buy & Hold', color='black',
-                    linestyle='--', linewidth=2)
-            plt.title(f'Trading Strategy Performance\n'
-                     f'Model: {final_model_return:.2f}% | Benchmark: {final_benchmark_return:.2f}% | Sharpe: {sharpe_ratio:.2f}')
-            plt.xlabel('Invervals Elapsed')
-            plt.ylabel('Portfolio Value')
-            plt.grid(True, alpha=0.3)
-            plt.legend()
-
-            plt.subplot(2, 2, 4)
+        if ax_recent is not None:
             last_month_days = min(30, len(model_capital))
             last_month_model = model_capital[-last_month_days:]
             last_month_benchmark = benchmark_capital[-last_month_days:]
 
-            plt.plot(range(last_month_days), last_month_model, label='Model Strategy', color='blue', linewidth=2)
-            plt.plot(range(last_month_days), last_month_benchmark, label='Buy & Hold', color='black',
-                    linestyle='--', linewidth=2)
+            ax_recent.plot(range(last_month_days), last_month_model, label='Model Strategy', color='blue', linewidth=2)
+            ax_recent.plot(range(last_month_days), last_month_benchmark, label='Buy & Hold', color='black',
+                          linestyle='--', linewidth=2)
+            ax_recent.set_title('Last 30 Intervals Performance')
+            ax_recent.set_xlabel('Intervals')
+            ax_recent.set_ylabel('Portfolio Value')
+            ax_recent.grid(True, alpha=0.3)
+            ax_recent.legend()
 
-        return (final_model_return, final_benchmark_return)
+        return {
+            'model_return': final_model_return,
+            'benchmark_return': final_benchmark_return,
+            'sharpe_ratio': sharpe_ratio,
+            'volatility': volatility,
+            'avg_interval_return': avg_interval_return,
+            'avg_benchmark_return': avg_benchmark_return,
+            'percent_invested': percent_days_invested,
+            'num_intervals': len(model_capital)
+        }
     
     def save_model(self, filepath):
         """
@@ -736,7 +830,6 @@ class EthereumPricePredictionModel:
             'window_length': self.window_length,
             'num_classes': self.num_classes,
             'meta_classifier': self.meta_classifier,
-            'investment_rate': self.investment_rate,
             'random_seed': self.random_seed,
             'feature_columns': self.feature_columns,
             'label_thresholds': self.label_thresholds,
@@ -775,58 +868,6 @@ class EthereumPricePredictionModel:
         # Save TensorFlow models
         self.tcn_model.save(f"{filepath}_tcn.keras")
         self.transformer_model.save(f"{filepath}_transformer.keras")
-        
-    
-    @classmethod
-    def load_tf_models(cls, instance, filepath):
-        """
-        Load TensorFlow models into an existing model instance.
-        
-        Args:
-            instance (EthereumPricePredictionModel): Model instance to load into
-            filepath (str): Base path to the saved TensorFlow models
-        """
-        # Load TensorFlow models
-        instance.tcn_model = load_model(f"{filepath}_tcn.keras")
-        instance.transformer_model = load_model(f"{filepath}_transformer.keras")
-        
-    
-    @classmethod
-    def load_model(cls, filepath):
-        """
-        Load a trained model from disk into a usable class instance.
-        
-        Args:
-            filepath (str): Path to the saved model
-            
-        Returns:
-            EthereumPricePredictionModel: Loaded model instance
-        """
-        # Load metadata
-        with open(f"{filepath}_metadata.pkl", 'rb') as f:
-            model_data = pickle.load(f)
-        
-        # Create model instance
-        model = cls(
-            window_length=model_data['window_length'],
-            num_classes=model_data['num_classes'],
-            meta_classifier=model_data['meta_classifier'],
-            investment_rate=model_data['investment_rate'],
-            random_seed=model_data['random_seed']
-        )
-        
-        # Load model components
-        model.tcn_model = load_model(f"{filepath}_tcn.keras")
-        model.transformer_model = load_model(f"{filepath}_transformer.keras")
-        model.xgb_model = joblib.load(f"{filepath}_xgb.pkl")
-        model.meta_model = joblib.load(f"{filepath}_meta.pkl")
-        
-        # Set metadata
-        model.feature_columns = model_data['feature_columns']
-        model.label_thresholds = model_data['label_thresholds']
-        model.is_trained = model_data['is_trained']
-        
-        return model
     
     def calculate_historical_backtesting(self, predictions_df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -837,7 +878,7 @@ class EthereumPricePredictionModel:
                                          where label is in range [0, num_labels)
 
         Returns:
-            pd.DataFrame: DataFrame with columns ['capital', 'benchmark', 'did_invest'] over time
+            np.ndArray: DataFrame with columns ['capital', 'benchmark', 'did_invest'] over time
         """
         if 'interval_start' not in predictions_df.columns or 'label' not in predictions_df.columns:
             raise ValueError("predictions_df must contain 'interval_start' and 'label' columns")
@@ -845,83 +886,71 @@ class EthereumPricePredictionModel:
         predictions = predictions_df['label'].values
         interval_starts = predictions_df['interval_start'].values
 
-        # Fetch historical price changes
         try:
             interval_start = pd.to_datetime(predictions_df['interval_start'].min())
             interval_end = pd.to_datetime(predictions_df['interval_start'].max())
-            price_deltas = get_historical_prices(interval_start, interval_end, interval='1d')
+            price_deltas = get_historical_prices(interval_start, interval_end, interval=self.interval_size)
+
+            print(f"\nBacktesting data alignment:")
+            print(f"  Prediction count: {len(predictions)}")
+            print(f"  Price delta count: {len(price_deltas)}")
+            print(f"  Date range: {interval_start.date()} to {interval_end.date()}")
 
         except Exception as e:
-            print(f"Warning: Could not fetch price data, using synthetic returns: {e}")
-            # Generate synthetic price changes as fallback
-            np.random.seed(42)
-            price_deltas = np.random.normal(0.001, 0.02, len(predictions))
+            print(f"Warning: Could not fetch price data {e}")
+            price_deltas = np.array([])
 
-        # Initialize capital tracking
-        model_capital = [1.0]
-        benchmark_capital = [1.0]
-        did_invest = [0]  # 0=hold, 1=long, -1=short
+        if len(price_deltas) == 0:
+            print("Warning: No price data available for backtesting")
+            return pd.DataFrame({
+                'model_capital': [1.0],
+                'benchmark_capital': [1.0],
+                'did_invest': [False]
+            })
 
-        # Get risk management parameters
-        max_loss_rate = float(os.getenv('STRATEGY_STOP_LOSS_RATE', '0.05'))
-
-        # Ensure price_deltas and predictions are aligned
-        # price_deltas from np.diff() is one element shorter than predictions
         min_length = min(len(predictions), len(price_deltas))
+        if min_length < len(predictions):
+            print(f"Warning: Truncating predictions from {len(predictions)} to {min_length} to match price data")
         predictions = predictions[:min_length]
         price_deltas = price_deltas[:min_length]
 
+        print(f"  Price delta stats: mean={np.mean(price_deltas):.6f}, std={np.std(price_deltas):.6f}")
+        print(f"  Price delta range: [{np.min(price_deltas):.6f}, {np.max(price_deltas):.6f}]")
+
+        if self.num_classes == 3:
+            decision_function = lambda x: bool(x == 2)
+        else:
+            decision_function = lambda x: bool(x >= 1)
+
+        decisions = []
+        [decisions.append(decision_function(pred)) for pred in predictions]
+
+        decisions = np.array(decisions)
+        decision_counts = np.unique(decisions, return_counts=True)
+        print(f"DEBUG: Investment decisions counts: {dict(zip(decision_counts[0], decision_counts[1]))}")
+
+        model_capital = [1.0]
+        benchmark_capital = [1.0]
+
         # Calculate cumulative returns
-        for i in range(min_length):
+        for i, delta in enumerate(price_deltas):
             # Benchmark (buy and hold) return
-            benchmark_capital.append(benchmark_capital[-1] * (1 + price_deltas[i]))
+            benchmark_capital.append(benchmark_capital[-1] * (1 + delta))
 
-            # Model strategy: trade based on predictions
-            # Determine investment decision based on prediction label
-            if self.num_classes == 3:
-                # For 3-class system: 0=sell/short, 1=hold, 2=buy
-                if predictions[i] == 2:  # Buy signal
-                    # Limit losses using environment variable
-                    capped_return = max(price_deltas[i], -max_loss_rate)
-                    capital_change = model_capital[-1] * capped_return * self.investment_rate
-                    model_capital.append(model_capital[-1] + capital_change)
-                    did_invest.append(1)
-                elif predictions[i] == 0:  # Sell signal (inverse position)
-                    # Short position - profit when price goes down
-                    capped_return = max(-price_deltas[i], -max_loss_rate)
-                    capital_change = model_capital[-1] * capped_return * self.investment_rate
-                    model_capital.append(model_capital[-1] + capital_change)
-                    did_invest.append(-1)
-                else:  # Hold (predictions[i] == 1)
-                    model_capital.append(model_capital[-1])
-                    did_invest.append(0)
+            if decisions[i]:
+                # Model strategy return when invested
+                model_capital.append(model_capital[-1] * (1 + delta))
             else:
-                # Generic approach for any number of classes
-                # Upper half of classes = buy signal, lower half = hold/sell
-                mid_point = (self.num_classes - 1) // 2
-                if predictions[i] > mid_point:
-                    # Upper half of classes = buy signal
-                    capped_return = max(price_deltas[i], -max_loss_rate)
-                    capital_change = model_capital[-1] * capped_return * self.investment_rate
-                    model_capital.append(model_capital[-1] + capital_change)
-                    did_invest.append(1)
-                elif predictions[i] < mid_point:
-                    # Lower half of classes = sell signal (short)
-                    capped_return = max(-price_deltas[i], -max_loss_rate)
-                    capital_change = model_capital[-1] * capped_return * self.investment_rate
-                    model_capital.append(model_capital[-1] + capital_change)
-                    did_invest.append(-1)
-                else:
-                    # Middle class = hold
-                    model_capital.append(model_capital[-1])
-                    did_invest.append(0)
+                # No change in capital when not invested
+                model_capital.append(model_capital[-1])
 
+        print(f"Final model val: {model_capital[-1]}")
+        print(f"Final hold val: {benchmark_capital[-1]}")
 
         backtesting_df = pd.DataFrame({
-            
-            'model_capital': model_capital,
-            'benchmark_capital': benchmark_capital,
-            'did_invest': did_invest
+            'model_capital': model_capital[1:],
+            'benchmark_capital': benchmark_capital[1:],
+            'did_invest': decisions
         })
 
         return backtesting_df
