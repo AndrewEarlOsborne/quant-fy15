@@ -3,6 +3,7 @@ import pickle
 import joblib
 import time
 import logging
+import threading
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -12,10 +13,10 @@ from tqdm import tqdm
 from typing import Any, Optional
 
 from keras.models import Model
-from keras.layers import Input, Dense, Dropout, BatchNormalization, Conv1D, Add, Activation, GlobalAveragePooling1D, MultiHeadAttention, LayerNormalization
+from keras.layers import Input, Dense, Dropout, BatchNormalization, LayerNormalization, MultiHeadAttention, Softmax
 from keras.optimizers import AdamW
 from keras.regularizers import l2
-from keras.losses import Loss, CategoricalFocalCrossentropy
+from keras.losses import Loss, CategoricalFocalCrossentropy, SparseCategoricalCrossentropy
 
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from sklearn.ensemble import RandomForestClassifier
@@ -23,6 +24,8 @@ from sklearn.svm import SVC
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
+
+from data_engineering import ClassificationConfig, load_price_history
 
 logger = logging.getLogger(__name__)
 
@@ -70,58 +73,6 @@ class CustomLoss(Loss):
         y_true_one_hot = tf.one_hot(y_true, depth=tf.shape(y_pred)[-1])
         return self.loss_func(y_true_one_hot, y_pred)
 
-def get_historical_prices(interval_start, interval_end, interval: str = '1h') -> np.ndarray:
-    """
-    Load historical ETH-USD price data from local CSV and return price changes.
-
-    Args:
-        interval_start (str or datetime): Start date for price data
-        interval_end (str or datetime): End date for price data
-        interval (str): Price interval ('1d', '1h', etc.) - currently ignored, using available data
-
-    Returns:
-        np.ndarray: Array of price changes (returns)
-
-    Raises:
-        ValueError: If start/end dates are invalid or price data is malformed
-        FileNotFoundError: If price history file doesn't exist
-    """
-    start_dt = pd.to_datetime(interval_start)
-    end_dt = pd.to_datetime(interval_end)
-
-    if pd.isna(start_dt) or pd.isna(end_dt):
-        raise ValueError("Invalid start or end datetime values")
-
-    price_history_path = os.getenv('PRICE_HISTORY_PATH', 'data/price_history/ETH_UDS_AUG17_TO_SEPT25.csv')
-
-    if not os.path.exists(price_history_path):
-        raise FileNotFoundError(f"Price history file not found at {price_history_path}")
-
-    logger.debug(f"Loading historical prices from {price_history_path} for {start_dt} to {end_dt}")
-
-    hist_data = pd.read_csv(price_history_path)
-
-    if hist_data.shape[0] == 0:
-        raise ValueError(f"Empty price history file: {price_history_path}")
-
-    hist_data['Open time'] = pd.to_datetime(hist_data['Open time'])
-    hist_data = hist_data[
-        (hist_data['Open time'] >= start_dt) &
-        (hist_data['Open time'] <= end_dt)
-    ].sort_values('Open time')
-
-    if hist_data.empty:
-        logger.warning(f"No price data found for {start_dt} to {end_dt}")
-        return np.array([])
-
-    close_prices = hist_data['Close'].values
-    price_changes = np.diff(close_prices) / close_prices[:-1]
-
-    return price_changes
-    
-
-
-
 class EthereumPricePredictionModel:
     """
     Ethereum price prediction model using stacking ensemble of TCN, Transformer, and XGBoost.
@@ -143,7 +94,7 @@ class EthereumPricePredictionModel:
         self.meta_classifier = meta_classifier
         self.random_seed = random_seed
         self.interval_size = '1h'
-        self.classification_config = classification_config
+        self.classification_config:ClassificationConfig = classification_config
 
         # Set random seeds
         tf.random.set_seed(random_seed)
@@ -163,7 +114,7 @@ class EthereumPricePredictionModel:
         self.evaluation_data: pd.DataFrame = None
         self.scaler = StandardScaler()
 
-    def _build_flat_tcn(self) -> Model:
+    def _build_tcn(self) -> Model:
         """Build TCN with a flat input layer"""
         input_layer = Input(shape=(self.num_features,), name='flat_input')
 
@@ -186,39 +137,84 @@ class EthereumPricePredictionModel:
         x = Dense(32, activation='relu', kernel_regularizer=l2(0.001))(x)
         x = Dropout(0.1)(x)
 
-        outputs = Dense(self.num_classes, activation='softmax', kernel_regularizer=l2(0.001))(x)
+        x = Dense(self.num_classes, kernel_regularizer=l2(0.001))(x)
+        outputs = Softmax(axis=-1)(x)
 
         return Model(input_layer, outputs, name="TCN")
 
-    def _build_flat_transformer(self):
+    def _build_transformer(self):
         """Build Transformer with a flat input layer"""
+
+        n_transformer_layers = 2
+        n_heads = 4
+        key_dim = 16
+        ffn_layer_size = 16
+
         input_layer = Input(shape=(self.num_features,), name='flat_input')
+        x = LayerNormalization()(input_layer)
 
-        x = Dense(128, activation='relu', kernel_regularizer=l2(0.001))(input_layer)
-        x = BatchNormalization()(x)
+        for _ in range(n_transformer_layers):
+
+            attention = MultiHeadAttention(num_heads=n_heads, key_dim=key_dim, dropout=0.1)(x, x)
+
+            x = tf.keras.layers.Add()([x, attention])
+
+            x = LayerNormalization()(x)
+
+            x = Dense(ffn_layer_size, activation='relu', kernel_regularizer=l2(0.001))(x)
+            x = Dropout(0.25)(x)
+
+        # Encoding stages
+
+        x = Dense(min(self.num_classes * 8, ffn_layer_size), activation='relu', kernel_regularizer=l2(0.001))(x)
         x = Dropout(0.25)(x)
 
-        x = Dense(96, activation='relu', kernel_regularizer=l2(0.001))(x)
-        x = BatchNormalization()(x)
+        x = Dense(self.num_classes*4, activation='relu', kernel_regularizer=l2(0.001))(x)
         x = Dropout(0.25)(x)
 
-        x = Dense(64, activation='relu', kernel_regularizer=l2(0.001))(x)
-        x = BatchNormalization()(x)
-        x = Dropout(0.25)(x)
-
-        x = Dense(48, activation='relu', kernel_regularizer=l2(0.001))(x)
-        x = Dropout(0.25)(x)
-
-        x = Dense(32, activation='relu', kernel_regularizer=l2(0.001))(x)
-        x = Dropout(0.25)(x)
-
-        outputs = Dense(self.num_classes, activation='softmax', kernel_regularizer=l2(0.001))(x)
+        x = Dense(self.num_classes, kernel_regularizer=l2(0.001))(x)
+        outputs = Softmax(axis=-1)(x)
 
         return Model(input_layer, outputs, name="Transformer")
-    
+
+    def _build_xgb(self):
+        """Build XGBoost classifier"""
+        return XGBClassifier(
+            max_leaves=5,
+            max_depth=10,
+            n_estimators=100,
+            learning_rate=0.05,
+            random_state=self.random_seed
+        )
+
+    def _build_meta_model(self):
+        """Build meta-classifier for stacking ensemble"""
+        if self.meta_classifier == 'xgb':
+            return XGBClassifier(
+                n_estimators=10,
+                max_depth=9,
+                learning_rate=0.1,
+                random_state=self.random_seed
+            )
+        elif self.meta_classifier == 'rf':
+            return RandomForestClassifier(
+                n_estimators=100,
+                max_depth=10,
+                random_state=self.random_seed
+            )
+        elif self.meta_classifier == 'svm':
+            return SVC(
+                kernel='rbf',
+                C=1.0,
+                probability=True,
+                random_state=self.random_seed
+            )
+        else:
+            raise ValueError(f"Unsupported meta_classifier: {self.meta_classifier}")
+
     def _train_keras_model(self, model: Model, X: np.ndarray, y_train: np.ndarray,
                           epochs: int = 1, batch_size: int = 32, model_name: str = "Model",
-                          train_split: float = 0.8) -> tuple[np.ndarray, np.ndarray]:
+                          train_split: float = 0.8, loss = CustomLoss()) -> tuple[np.ndarray, np.ndarray]:
         """Train Keras model with train/validation split"""
         split_idx = int(len(X) * train_split)
         X_tr = X[:split_idx]
@@ -241,7 +237,7 @@ class EthereumPricePredictionModel:
 
         model.compile(
             optimizer=AdamW(learning_rate=0.0001, weight_decay=0.01),
-            loss=CustomLoss(),
+            loss=loss,
         )
 
         training_start = time.time()
@@ -283,7 +279,7 @@ class EthereumPricePredictionModel:
         logger.debug(f"{model_name} val prediction distribution: {val_pred_dist}")
 
         return train_probs, val_probs
-    
+
     def _train_sklearn_model(self, model, X: np.ndarray, y: np.ndarray,
                             model_name: str = "Sklearn Model",
                             train_split: float = 0.8) -> tuple[np.ndarray, np.ndarray]:
@@ -302,8 +298,8 @@ class EthereumPricePredictionModel:
         train_probs = model.predict_proba(X_tr)
         val_probs = model.predict_proba(X_val)
         return train_probs, val_probs
-    
-    
+
+
     def train(self, data: pd.DataFrame) -> None:
         """
         Train the stacking ensemble model.
@@ -345,40 +341,59 @@ class EthereumPricePredictionModel:
         self.num_features = len(self.feature_columns)
 
         logger.info("Initializing ensemble models (TCN, Transformer, XGBoost)")
-        self.tcn_model: Model | None = self._build_flat_tcn()
-        self.transformer_model = self._build_flat_transformer()
-        self.xgb_model = XGBClassifier(
-            max_leaves=5, max_depth=10, n_estimators=100, learning_rate=0.05,
-            random_state=self.random_seed
-        )
+        self.tcn_model: Model | None = self._build_tcn()
+        self.transformer_model = self._build_transformer()
+        self.xgb_model = self._build_xgb()
 
         logger.info("="*60)
-        logger.info("Starting model training")
+        logger.info("Starting concurrent model training")
         logger.info("="*60)
 
         training_start_time = time.time()
 
-        main_pbar = tqdm(total=4, desc="Overall Training Progress", position=0, leave=True)
+        results = {}
 
-        # TCN Training
-        stage_start = time.time()
-        tcn_train_probs, tcn_val_probs = self._train_keras_model(
-            self.tcn_model, X_train, y_train, model_name="TCN"
-        )
-        stage_time = time.time() - stage_start
-        main_pbar.update(1)
+        def train_tcn():
+            start_time = time.time()
+            logger.info("[TCN] Training started")
+            result = self._train_keras_model(self.tcn_model, X_train, y_train, model_name="TCN")
+            elapsed = time.time() - start_time
+            logger.info(f"[TCN] Training completed in {elapsed:.1f}s")
+            results['tcn'] = result
 
-        # Transformer Training
-        stage_start = time.time()
-        transformer_train_probs, transformer_val_probs = self._train_keras_model(
-            self.transformer_model, X_train, y_train, model_name="Transformer"
-        )
-        main_pbar.update(1)
+        def train_transformer():
+            start_time = time.time()
+            logger.info("[Transformer] Training started")
+            result = self._train_keras_model(self.transformer_model, X_train, y_train, model_name="Transformer", loss=SparseCategoricalCrossentropy)
+            elapsed = time.time() - start_time
+            logger.info(f"[Transformer] Training completed in {elapsed:.1f}s")
+            results['transformer'] = result
 
-        # XGBoost Training
-        xgb_train_probs, xgb_val_probs = self._train_sklearn_model(
-            self.xgb_model, X_train, y_train, model_name="XGBoost"
-        )
+        def train_xgb():
+            start_time = time.time()
+            logger.info("[XGBoost] Training started")
+            result = self._train_sklearn_model(self.xgb_model, X_train, y_train, model_name="XGBoost")
+            elapsed = time.time() - start_time
+            logger.info(f"[XGBoost] Training completed in {elapsed:.1f}s")
+            results['xgb'] = result
+
+        main_pbar = tqdm(total=2, desc="Overall Progress", position=0, leave=True)
+
+        tcn_thread = threading.Thread(target=train_tcn)
+        transformer_thread = threading.Thread(target=train_transformer)
+        xgb_thread = threading.Thread(target=train_xgb)
+
+        tcn_thread.start()
+        transformer_thread.start()
+        xgb_thread.start()
+
+        tcn_thread.join()
+        transformer_thread.join()
+        xgb_thread.join()
+
+        tcn_train_probs, tcn_val_probs = results['tcn']
+        transformer_train_probs, transformer_val_probs = results['transformer']
+        xgb_train_probs, xgb_val_probs = results['xgb']
 
         main_pbar.update(1)
 
@@ -401,9 +416,6 @@ class EthereumPricePredictionModel:
             logger.info(f"{model_name} - Accuracy: {accuracy:.4f}, F1 (Weighted): {f1_weighted:.4f}, F1 (Macro): {f1_macro:.4f}")
             logger.debug(f"{model_name} prediction distribution: {pred_pct}")
 
-        # Meta-Classifier Training
-
-        # Create meta-features from probability distributions
         train_meta_features = np.hstack((
             tcn_train_probs, transformer_train_probs, xgb_train_probs
         ))
@@ -412,30 +424,18 @@ class EthereumPricePredictionModel:
             tcn_val_probs, transformer_val_probs, xgb_val_probs
         ))
 
-        # Get split index to separate train/val labels
         split_idx = int(len(y_train) * 0.8)
         y_train_split = y_train[:split_idx]
         y_val_split = y_train[split_idx:]
 
-        # Initialize and train meta-classifier on training split only
-        if self.meta_classifier == 'rf':
-            self.meta_model = RandomForestClassifier(
-                n_estimators=100, max_depth=10, random_state=self.random_seed
-            )
-        elif self.meta_classifier == 'svm':
-            self.meta_model = SVC(
-                kernel='rbf', C=1.0, probability=True, random_state=self.random_seed
-            )
-        elif self.meta_classifier == 'xgb':
-            self.meta_model = XGBClassifier(
-                n_estimators=10, max_depth=9, learning_rate=0.1,
-                random_state=self.random_seed
-            )
-
+        logger.info("[Meta-Classifier] Training started")
+        meta_start = time.time()
+        self.meta_model = self._build_meta_model()
         self.meta_model.fit(train_meta_features, y_train_split)
+        meta_elapsed = time.time() - meta_start
+        logger.info(f"[Meta-Classifier] Training completed in {meta_elapsed:.1f}s")
 
         main_pbar.update(1)
-
         main_pbar.close()
 
         total_time = time.time() - training_start_time
@@ -456,8 +456,8 @@ class EthereumPricePredictionModel:
         logger.info(f"Validation predictions: {dict(zip(*np.unique(val_predictions, return_counts=True)))}")
 
         self.is_trained = True
-        
-    
+
+
     def predict(self, X_data) -> dict[str, Any]:
         """
         Make predictions on new data.
@@ -507,7 +507,7 @@ class EthereumPricePredictionModel:
 
         return {'final_predictions': final_predictions,
                 'submodel_predictions': meta_features}
-    
+
     def evaluate(self, data: pd.DataFrame, show_results: bool = True) -> dict:
         """
         Evaluate model performance using evaluation data.
@@ -536,7 +536,7 @@ class EthereumPricePredictionModel:
 
         predictions = self.predict(X)
         final_predictions: np.ndarray = predictions.get('final_predictions')
-        submodel_predictions: np.ndarray = predictions['submodel_predictions']
+        predictions['submodel_predictions']
 
         eval_pred_dist = dict(zip(*np.unique(final_predictions, return_counts=True)))
         logger.info(f"Evaluation predictions distribution: {eval_pred_dist}")
@@ -572,7 +572,7 @@ class EthereumPricePredictionModel:
 
         if show_results:
             # Create unified 2x3 visualization
-            fig = plt.figure(figsize=(18, 10))
+            plt.figure(figsize=(18, 10))
 
             # [0,0] Validation Confusion Matrix (from training phase)
             ax1 = plt.subplot(2, 3, 1)
@@ -586,7 +586,7 @@ class EthereumPricePredictionModel:
                 ax1.set_xlabel('Predicted Label', fontsize=9)
                 ax1.set_ylabel('True Label', fontsize=9)
                 ax1.tick_params(labelsize=8)
-            
+
             else:
                 ax1.text(0.5, 0.5, 'Validation data not available', ha='center', va='center')
                 ax1.set_title('Validation Confusion Matrix')
@@ -635,16 +635,18 @@ class EthereumPricePredictionModel:
                     decision_function = self.classification_config.get_decision_function()
                 else:
                     if self.num_classes == 3:
-                        decision_function = lambda x: bool(x == 2)
+                        def decision_function(x):
+                            return bool(x == 2)
                     else:
-                        decision_function = lambda x: bool(x >= self.num_classes // 2)
+                        def decision_function(x):
+                            return bool(x >= self.num_classes // 2)
 
                 invest_decisions = [decision_function(pred) for pred in final_predictions]
                 invest_deltas = deltas[invest_decisions]
                 no_invest_deltas = deltas[[not d for d in invest_decisions]]
 
                 positions = [1, 2]
-                bp = ax4.boxplot([invest_deltas, no_invest_deltas], positions=positions,
+                ax4.boxplot([invest_deltas, no_invest_deltas], positions=positions,
                                  widths=0.6, patch_artist=True,
                                  boxprops=dict(facecolor='lightblue', alpha=0.7),
                                  medianprops=dict(color='red', linewidth=2))
@@ -711,7 +713,7 @@ Backtesting:
         }
 
         return results
-    
+
     def display_backtesting_results(self, predictions_df: pd.DataFrame,
                                    ax_full: Optional[plt.Axes] = None,
                                    ax_recent: Optional[plt.Axes] = None) -> dict:
@@ -764,7 +766,7 @@ Backtesting:
         volatility = np.std(interval_returns) * 100
         sharpe_ratio = avg_interval_return / volatility if volatility > 0 else 0
 
-        percent_days_invested = (np.sum(np.array(did_invest) != False) / len(did_invest)) * 100
+        percent_days_invested = (np.sum(np.array(did_invest)) / len(did_invest)) * 100
 
         if ax_full is not None:
             ax_full.plot(model_capital, label='Model Strategy', color='blue', linewidth=2)
@@ -816,20 +818,20 @@ Backtesting:
             'percent_invested': percent_days_invested,
             'num_intervals': len(model_capital)
         }
-    
+
     def save_model(self, filepath):
         """
         Save the trained model to disk.
-        
+
         Args:
             filepath (str): Path to save the model
         """
         if not self.is_trained:
             raise ValueError("Model must be trained before saving")
-        
+
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        
+
         # Save model components
         model_data = {
             'window_length': self.window_length,
@@ -842,36 +844,36 @@ Backtesting:
             'classification_config': self.classification_config,
             'scaler': self.scaler
         }
-        
+
         # Save Keras models
         self.tcn_model.save(f"{filepath}_tcn.keras")
         self.transformer_model.save(f"{filepath}_transformer.keras")
-        
+
         # Save sklearn models
         joblib.dump(self.xgb_model, f"{filepath}_xgb.pkl")
         joblib.dump(self.meta_model, f"{filepath}_meta.pkl")
-        
+
         # Save metadata
         with open(f"{filepath}_metadata.pkl", 'wb') as f:
             pickle.dump(model_data, f)
-        
-    
+
+
     def save_tf_models(self, filepath):
         """
         Save only the TensorFlow models to disk.
-        
+
         Args:
             filepath (str): Base path to save the TensorFlow models
         """
         if not self.is_trained:
             raise ValueError("Model must be trained before saving")
-        
+
         if self.tcn_model is None or self.transformer_model is None:
             raise ValueError("TensorFlow models are not initialized")
-        
+
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        
+
         # Save TensorFlow models
         self.tcn_model.save(f"{filepath}_tcn.keras")
         self.transformer_model.save(f"{filepath}_transformer.keras")
@@ -904,7 +906,9 @@ Backtesting:
 
         logger.debug(f"Fetching price data for {interval_start} to {interval_end}")
 
-        price_deltas: np.ndarray = get_historical_prices(interval_start, interval_end, interval=self.interval_size)
+        price_history = load_price_history(interval_start, interval_end)
+        close_prices = price_history['Close'].values
+        price_deltas = np.diff(close_prices) / close_prices[:-1]
 
         if len(predictions) == 0:
             raise ValueError("Empty predictions array")
@@ -927,9 +931,11 @@ Backtesting:
             decision_function = self.classification_config.get_decision_function()
         else:
             if self.num_classes == 3:
-                decision_function = lambda x: bool(x == 2)
+                def decision_function(x):
+                    return bool(x == 2)
             else:
-                decision_function = lambda x: bool(x >= self.num_classes // 2)
+                def decision_function(x):
+                    return bool(x >= self.num_classes // 2)
 
         decisions = np.array([decision_function(pred) for pred in predictions])
         decision_counts = np.unique(decisions, return_counts=True)

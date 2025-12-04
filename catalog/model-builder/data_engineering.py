@@ -10,10 +10,15 @@ import logging
 from typing import Optional, List, Callable
 
 class ClassificationConfig(BaseModel):
-    num_classes: int = Field(default=3, ge=2, description="Number of classification labels (2+)")
+    num_classes: int = Field(
+        default=3, ge=2, description="Number of classification labels (2+)"
+    )
     label_strategy: str = Field(
         default="percentile",
-        description="Labeling strategy: 'percentile', 'linspace', 'centered-linspace', 'stddev', 'custom'"
+        description=(
+            "Labeling strategy: 'percentile', 'linspace', "
+            "'centered-linspace', 'stddev', 'custom'"
+        )
     )
     custom_thresholds: Optional[List[float]] = Field(
         default=None,
@@ -53,13 +58,45 @@ class ClassificationConfig(BaseModel):
 
         Returns:
             Callable[[int], bool]: Function that takes label index and returns investment decision
-        """
 
-        threshold = self.num_classes // 2
-        if self.num_classes % 2 == 1:
-            return lambda label: label > threshold if not self.median_label_invest else label >= threshold
+        Strategies:
+            - median-split: Invest if label is above median (supports median_label_invest for odd num_classes)
+            - threshold: Invest if label >= threshold * num_classes (requires decision_threshold)
+            - top-k: Invest if label is in top k classes (requires decision_top_k)
+            - confidence-weighted: Invest if label is in top half (weighted by confidence in prediction model)
+        """
+        if self.decision_strategy == 'median-split':
+            threshold = self.num_classes // 2
+            if self.num_classes % 2 == 1:
+                return lambda label: label > threshold if not self.median_label_invest else label >= threshold
+            else:
+                return lambda label: label >= threshold
+
+        elif self.decision_strategy == 'threshold':
+            if self.decision_threshold is None:
+                raise ValueError("decision_threshold must be set for 'threshold' strategy")
+            if not (0.0 <= self.decision_threshold <= 1.0):
+                raise ValueError("decision_threshold must be between 0.0 and 1.0")
+            threshold_label = int(self.decision_threshold * self.num_classes)
+            return lambda label: label >= threshold_label
+
+        elif self.decision_strategy == 'top-k':
+            if self.decision_top_k is None:
+                raise ValueError("decision_top_k must be set for 'top-k' strategy")
+            if not (1 <= self.decision_top_k <= self.num_classes):
+                raise ValueError(f"decision_top_k must be between 1 and {self.num_classes}")
+            min_label = self.num_classes - self.decision_top_k
+            return lambda label: label >= min_label
+
+        elif self.decision_strategy == 'confidence-weighted':
+            threshold = self.num_classes // 2
+            if self.num_classes % 2 == 1:
+                return lambda label: label > threshold if not self.median_label_invest else label >= threshold
+            else:
+                return lambda label: label >= threshold
+
         else:
-            return lambda label: label >= threshold
+            raise ValueError(f"Unknown decision_strategy: {self.decision_strategy}")
 
 class DataConfig(BaseModel):
     num_classes:int = Field(default = 3, description= "Number of classifications that price can be split into.")
@@ -70,7 +107,7 @@ class DataConfig(BaseModel):
         default=None,
         description="Classification configuration (overrides num_classes and label_strategy if provided)"
     )
-    
+
 
 def engineer_features(config: DataConfig) -> DataFrame:
     """Engineer features for model training, given a directory of VM results."""
@@ -89,9 +126,12 @@ def engineer_features(config: DataConfig) -> DataFrame:
     aggregated_results['interval_start'] = pd.to_datetime(aggregated_results['interval_start']).dt.floor('h')
     aggregated_results['interval_end'] = pd.to_datetime(aggregated_results['interval_end']).dt.floor('h')
 
-    #Add price Data
-    price_history = get_price_features(config)
+    price_history = load_price_history()
 
+    price_history['date'] = price_history['datetime'].dt.date
+    price_history['delta'] = price_history['price'].pct_change().shift(-1)
+    price_history['volatility'] = price_history['delta'].shift(1).rolling(window=7, min_periods=1).std()
+    price_history['m_avg'] = price_history['price'].rolling(window=config.window_length, min_periods=1).mean()
 
     results_with_price = aggregated_results.merge(price_history, left_on='interval_start', right_on='datetime', how='inner')
     results_with_price.sort_values(by='datetime', inplace=True)
@@ -164,55 +204,63 @@ def build_window_features(X:DataFrame, windowed_features, window_length) -> Data
     return feature_data
 
 
-def get_price_features(config) -> DataFrame:
-    """Load and engineer features from local price history data. Get the prices interval for the time given in .env. Returns datetime and prices based on interval specs"""
+def load_price_history(interval_start=None, interval_end=None) -> DataFrame:
+    """Load historical ETH-USD price data from local CSV.
 
-    for file in os.listdir('data/price_history/'):
-        if not file.endswith('.csv'):
-            continue
-        # print(f"Loading price history from {file}")
-        hist_data = pd.read_csv(f'data/price_history/{file}')
+    Args:
+        interval_start (str or datetime, optional): Start date for filtering. If None, returns all data.
+        interval_end (str or datetime, optional): End date for filtering. If None, returns all data.
 
-    # Convert to datetime and truncate to hour level for consistent matching
-    print(f"Loaded {hist_data.shape[0]} records from local price history")
+    Returns:
+        DataFrame: Price history with columns ['datetime', 'price', 'Open', 'High', 'Low', 'Close', 'Volume']
+                  All data is hourly-floored and deduplicated.
 
+    Raises:
+        ValueError: If start/end dates are invalid or price data is empty
+        FileNotFoundError: If price history file doesn't exist
+    """
+    logger = logging.getLogger(__name__)
 
-    column_mapping = {
-        'Open time': 'datetime',
-        # 'Volume': 'volume',
-        'Open': 'price',
-        # 'High': 'high',
-        # 'Low': 'low'
-    }
+    price_history_path = os.getenv('PRICE_HISTORY_PATH', 'data/price_history/ETH_UDS_AUG17_TO_SEPT25.csv')
 
-    # Rename columns
-    hist_data = hist_data.rename(columns=column_mapping)
+    if not os.path.exists(price_history_path):
+        for file in os.listdir('data/price_history/'):
+            if file.endswith('.csv'):
+                price_history_path = f'data/price_history/{file}'
+                break
+        else:
+            raise FileNotFoundError("No price history CSV found in data/price_history/")
 
-    hist_data['datetime'] = pd.to_datetime(hist_data['datetime']).dt.floor('h')
+    logger.debug(f"Loading price history from {price_history_path}")
+    hist_data = pd.read_csv(price_history_path)
 
-    # Remove duplicates in same hour - keep first observation
+    if hist_data.shape[0] == 0:
+        raise ValueError(f"Empty price history file: {price_history_path}")
+
+    hist_data['Open time'] = pd.to_datetime(hist_data['Open time'])
+    hist_data = hist_data.rename(columns={'Open time': 'datetime', 'Open': 'price'})
+    hist_data['datetime'] = hist_data['datetime'].dt.floor('h')
     hist_data = hist_data.drop_duplicates(subset=['datetime'], keep='first')
-
-    # Create date column from datetime
-    hist_data['date'] = hist_data['datetime'].dt.date
-    
-    # Feature engineering
     hist_data['price'] = pd.to_numeric(hist_data['price'], errors='coerce')
     hist_data['price'] = hist_data['price'].interpolate(method='linear', limit_direction='both')
 
-    # Price change features
-    hist_data['delta'] = hist_data['price'].pct_change().shift(-1)
-    # hist_data['lag1_delta'] = hist_data['delta'].shift(1, fill_value=0)
-    # hist_data['lag2_delta'] = hist_data['delta'].shift(2, fill_value=0)
+    if interval_start is not None or interval_end is not None:
+        start_dt = pd.to_datetime(interval_start) if interval_start else hist_data['datetime'].min()
+        end_dt = pd.to_datetime(interval_end) if interval_end else hist_data['datetime'].max()
 
-    # Volatility features
-    hist_data['volatility'] = hist_data['delta'].shift(1).rolling(window=7, min_periods=1).std()
+        if pd.isna(start_dt) or pd.isna(end_dt):
+            raise ValueError("Invalid start or end datetime values")
 
-    # Moving averages
-    hist_data['m_avg'] = hist_data['price'].rolling(window=config.window_length, min_periods=1).mean()
-    
-    # Sort by datetime
-    hist_data.sort_values(by='datetime', inplace=True)
+        hist_data = hist_data[
+            (hist_data['datetime'] >= start_dt) &
+            (hist_data['datetime'] <= end_dt)
+        ]
+
+        if hist_data.empty:
+            raise ValueError(f"No price data found for {start_dt} to {end_dt}")
+
+    hist_data = hist_data.sort_values('datetime').reset_index(drop=True)
+    logger.info(f"Loaded {hist_data.shape[0]} records from price history")
 
     return hist_data
 
@@ -313,7 +361,7 @@ def make_labels(data:DataFrame, num_labels: int = 3, strategy="linspace", custom
         logger.info(f"Label thresholds: {[f'{s:.6f}' for s in splits]}")
 
     return df
-        
+
 
 def show_label_distribution(data:pd.DataFrame):
     """Plot the distribution of labels across price delta distribution using a stacked bar chart.
@@ -378,14 +426,14 @@ def show_label_distribution(data:pd.DataFrame):
 
     plt.tight_layout()
     plt.show()
-    
+
     # Print summary statistics
-    print(f"\nSummary Statistics:")
+    print("\nSummary Statistics:")
     print(f"Total samples: {len(df)}")
     print(f"Positive deltas: {len(df[df['delta_pct'] > 0])} ({len(df[df['delta_pct'] > 0])/len(df)*100:.1f}%)")
     print(f"Negative deltas: {len(df[df['delta_pct'] < 0])} ({len(df[df['delta_pct'] < 0])/len(df)*100:.1f}%)")
     print(f"Zero deltas: {len(df[df['delta_pct'] == 0])} ({len(df[df['delta_pct'] == 0])/len(df)*100:.1f}%)")
-    
+
     for label in unique_labels:
         label_count = len(df[df['label'] == label])
         print(f"Label {label}: {label_count} samples ({label_count/len(df)*100:.1f}%)")

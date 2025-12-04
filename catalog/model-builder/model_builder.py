@@ -48,7 +48,7 @@ class ModelBuilder:
         logger.info(f"ModelBuilder initialized: {self.num_classes} classes, window={self.window_length}")
         logger.debug(f"Classification config: {self.classification_config}")
 
-            
+
     def load_data(self, data_file: str, test_train_split: float = 0.0) -> None:
         """
         Load and preprocess data from CSV file.
