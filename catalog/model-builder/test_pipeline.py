@@ -31,7 +31,7 @@ logger.info("Starting Model Training Pipeline")
 logger.info("="*60)
 
 classification_config = ClassificationConfig(
-    num_classes=5,
+    num_classes=3,
     label_strategy='percentile',
     decision_strategy='median-split',
     decision_threshold=None,

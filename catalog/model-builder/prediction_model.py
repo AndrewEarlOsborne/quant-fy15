@@ -13,10 +13,11 @@ from tqdm import tqdm
 from typing import Any, Optional
 
 from keras.models import Model
-from keras.layers import Input, Dense, Dropout, BatchNormalization, LayerNormalization, MultiHeadAttention, Softmax
+from keras.layers import Input, Dense, Dropout, BatchNormalization, LayerNormalization, MultiHeadAttention, Activation, Layer, Concatenate, Add, Lambda, ZeroPadding1D, Reshape
 from keras.optimizers import AdamW
 from keras.regularizers import l2
 from keras.losses import Loss, CategoricalFocalCrossentropy, SparseCategoricalCrossentropy
+from keras import ops
 
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from sklearn.ensemble import RandomForestClassifier
@@ -28,6 +29,34 @@ from xgboost import XGBClassifier
 from data_engineering import ClassificationConfig, load_price_history
 
 logger = logging.getLogger(__name__)
+
+
+class AddCLSToken(Layer):
+    """Custom layer to add CLS token at the beginning of sequence"""
+
+    def __init__(self, embed_dim, **kwargs):
+        super().__init__(**kwargs)
+        self.embed_dim = embed_dim
+
+    def build(self, input_shape):
+        self.cls_token = self.add_weight(
+            name='cls_token',
+            shape=(1, 1, self.embed_dim),
+            initializer='random_normal',
+            trainable=True
+        )
+        super().build(input_shape)
+
+    def call(self, x):
+        batch_size = ops.shape(x)[0]
+        cls_tokens = ops.tile(self.cls_token, [batch_size, 1, 1])
+        return ops.concatenate([cls_tokens, x], axis=1)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"embed_dim": self.embed_dim})
+        return config
+
 
 class TqdmCallback(tf.keras.callbacks.Callback):
     """Custom Keras callback for tqdm progress tracking during training"""
@@ -66,7 +95,7 @@ class CustomLoss(Loss):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.loss_func = CategoricalFocalCrossentropy(from_logits=False, alpha=0.1, gamma=2.0)
+        self.loss_func = CategoricalFocalCrossentropy(from_logits=True, alpha=0.1, gamma=2.0)
 
     def call(self, y_true, y_pred):
         y_true = tf.cast(y_true, tf.int32)
@@ -78,20 +107,18 @@ class EthereumPricePredictionModel:
     Ethereum price prediction model using stacking ensemble of TCN, Transformer, and XGBoost.
     """
 
-    def __init__(self, num_classes, window_length=14, meta_classifier='xgb',  random_seed=1234, classification_config=None):
+    def __init__(self, num_classes, window_length=14, random_seed=1234, classification_config=None):
         """
         Initialize the prediction model.
 
         Args:
             num_classes (int): Number of prediction classes
             window_length (int): Length of time series windows
-            meta_classifier (str): Type of meta classifier ('rf', 'svm', 'xgb')
             random_seed (int): Random seed for reproducibility
             classification_config (ClassificationConfig): Classification configuration (optional)
         """
         self.window_length = window_length
         self.num_classes: int = num_classes
-        self.meta_classifier = meta_classifier
         self.random_seed = random_seed
         self.interval_size = '1h'
         self.classification_config:ClassificationConfig = classification_config
@@ -137,43 +164,69 @@ class EthereumPricePredictionModel:
         x = Dense(32, activation='relu', kernel_regularizer=l2(0.001))(x)
         x = Dropout(0.1)(x)
 
-        x = Dense(self.num_classes, kernel_regularizer=l2(0.001))(x)
-        outputs = Softmax(axis=-1)(x)
+        logits = Dense(self.num_classes, kernel_regularizer=l2(0.001))(x)
+        outputs = Activation('softmax')(logits)
 
         return Model(input_layer, outputs, name="TCN")
 
     def _build_transformer(self):
-        """Build Transformer with a flat input layer"""
+        """Build Transformer with ViT-inspired patch embedding for tabular data"""
 
         n_transformer_layers = 2
         n_heads = 4
-        key_dim = 16
-        ffn_layer_size = 16
+        key_dim = 32
+        embed_dim = 64
+        patch_size = 4
+        ffn_dim = 128
 
         input_layer = Input(shape=(self.num_features,), name='flat_input')
-        x = LayerNormalization()(input_layer)
 
-        for _ in range(n_transformer_layers):
+        num_patches = max(1, self.num_features // patch_size)
+        padded_features = num_patches * patch_size
 
-            attention = MultiHeadAttention(num_heads=n_heads, key_dim=key_dim, dropout=0.1)(x, x)
+        if self.num_features < padded_features:
+            x = Lambda(lambda x: ops.expand_dims(x, axis=-1))(input_layer)
+            x = ZeroPadding1D(padding=(0, padded_features - self.num_features))(x)
+            x = Lambda(lambda x: ops.squeeze(x, axis=-1))(x)
+        else:
+            x = Lambda(lambda x: x[:, :padded_features])(input_layer)
 
-            x = tf.keras.layers.Add()([x, attention])
+        x = Reshape((num_patches, patch_size))(x)
 
+        x = Dense(embed_dim, kernel_regularizer=l2(0.001))(x)
+        x = LayerNormalization()(x)
+
+        x = AddCLSToken(embed_dim)(x)
+
+        for layer_idx in range(n_transformer_layers):
+            attn_output = MultiHeadAttention(
+                num_heads=n_heads,
+                key_dim=key_dim,
+                dropout=0.1,
+                name=f'mha_{layer_idx}'
+            )(x, x)
+
+            x = Add()([x, attn_output])
             x = LayerNormalization()(x)
 
-            x = Dense(ffn_layer_size, activation='relu', kernel_regularizer=l2(0.001))(x)
-            x = Dropout(0.25)(x)
+            ffn_output = Dense(ffn_dim, activation='gelu', kernel_regularizer=l2(0.001))(x)
+            ffn_output = Dropout(0.1)(ffn_output)
+            ffn_output = Dense(embed_dim, kernel_regularizer=l2(0.001))(ffn_output)
+            ffn_output = Dropout(0.1)(ffn_output)
 
-        # Encoding stages
+            x = Add()([x, ffn_output])
+            x = LayerNormalization()(x)
 
-        x = Dense(min(self.num_classes * 8, ffn_layer_size), activation='relu', kernel_regularizer=l2(0.001))(x)
-        x = Dropout(0.25)(x)
+        cls_output = Lambda(lambda x: x[:, 0, :])(x)
 
-        x = Dense(self.num_classes*4, activation='relu', kernel_regularizer=l2(0.001))(x)
-        x = Dropout(0.25)(x)
+        x = Dense(128, activation='gelu', kernel_regularizer=l2(0.001))(cls_output)
+        x = Dropout(0.2)(x)
 
-        x = Dense(self.num_classes, kernel_regularizer=l2(0.001))(x)
-        outputs = Softmax(axis=-1)(x)
+        x = Dense(64, activation='gelu', kernel_regularizer=l2(0.001))(x)
+        x = Dropout(0.2)(x)
+
+        logits = Dense(self.num_classes, kernel_regularizer=l2(0.001), name='transformer_output')(x)
+        outputs = Activation('softmax')(logits)
 
         return Model(input_layer, outputs, name="Transformer")
 
@@ -187,30 +240,55 @@ class EthereumPricePredictionModel:
             random_state=self.random_seed
         )
 
+    def _build_mlp_meta_model(self):
+        """Build MLP meta-classifier: (n_submodels * n_classes) -> [16, 16, 8] -> n_classes"""
+        n_submodels = 3 # TODO: calculate dynamically due to the number of listed sub-models
+        input_dim = n_submodels * self.num_classes
+
+        input_layer = Input(shape=(input_dim,), name='meta_input')
+
+        x = Dense(16, activation='relu', kernel_regularizer=l2(0.001))(input_layer)
+        x = BatchNormalization()(x)
+        x = Dropout(0.2)(x)
+
+        x = Dense(16, activation='relu', kernel_regularizer=l2(0.001))(x)
+        x = BatchNormalization()(x)
+        x = Dropout(0.2)(x)
+
+        x = Dense(8, activation='relu', kernel_regularizer=l2(0.001))(x)
+        x = Dropout(0.1)(x)
+
+        logits = Dense(self.num_classes, kernel_regularizer=l2(0.001))(x)
+        outputs = Activation('softmax')(logits)
+
+        return Model(input_layer, outputs, name="MLP_MetaClassifier").compile(
+                optimizer=AdamW(learning_rate=0.001, weight_decay=0.01),
+                loss=SparseCategoricalCrossentropy(from_logits=False),
+                metrics=['accuracy']
+            )
+
+    
     def _build_meta_model(self):
         """Build meta-classifier for stacking ensemble"""
-        if self.meta_classifier == 'xgb':
+        classifier_model_type = self.classification_config.classifier_model_type
+        if classifier_model_type == 'xgb':
             return XGBClassifier(
                 n_estimators=10,
                 max_depth=9,
-                learning_rate=0.1,
+                learning_rate=0.005,
                 random_state=self.random_seed
             )
-        elif self.meta_classifier == 'rf':
-            return RandomForestClassifier(
-                n_estimators=100,
-                max_depth=10,
-                random_state=self.random_seed
-            )
-        elif self.meta_classifier == 'svm':
+        elif classifier_model_type == 'svm':
             return SVC(
                 kernel='rbf',
                 C=1.0,
                 probability=True,
                 random_state=self.random_seed
             )
+        elif classifier_model_type == 'mlp':
+            return self._build_mlp_meta_model()
         else:
-            raise ValueError(f"Unsupported meta_classifier: {self.meta_classifier}")
+            raise ValueError(f"Unsupported meta classifier input: {self.classification_config.classifier_model_type}")
 
     def _train_keras_model(self, model: Model, X: np.ndarray, y_train: np.ndarray,
                           epochs: int = 1, batch_size: int = 32, model_name: str = "Model",
@@ -228,12 +306,11 @@ class EthereumPricePredictionModel:
             y=y_tr
         )
         class_weight_dict = dict(enumerate(class_weights))
-        logger.debug(f"{model_name} class weights: {class_weight_dict}")
 
         train_class_dist = dict(zip(*np.unique(y_tr, return_counts=True)))
         val_class_dist = dict(zip(*np.unique(y_val, return_counts=True)))
-        logger.debug(f"{model_name} train class distribution: {train_class_dist}")
-        logger.debug(f"{model_name} val class distribution: {val_class_dist}")
+        logger.debug(f"[{model_name}] Class weights: {class_weight_dict}")
+        logger.debug(f"[{model_name}] Train distribution: {train_class_dist} | Val distribution: {val_class_dist}")
 
         model.compile(
             optimizer=AdamW(learning_rate=0.0001, weight_decay=0.01),
@@ -251,7 +328,6 @@ class EthereumPricePredictionModel:
         )
 
         training_time = time.time() - training_start
-        logger.info(f"{model_name} training completed in {training_time:.1f}s")
 
         train_probs = model.predict(X_tr, verbose=0)
         val_probs = model.predict(X_val, verbose=0)
@@ -265,7 +341,7 @@ class EthereumPricePredictionModel:
         val_pred_dist = dict(zip(*np.unique(val_preds, return_counts=True)))
 
         if len(val_pred_dist) == 1:
-            logger.warning(f"{model_name} collapse - only predicting class {list(val_pred_dist.keys())[0]}")
+            logger.warning(f"[{model_name}] Model collapse - only predicting class {list(val_pred_dist.keys())[0]}")
 
         per_class_acc = []
         for class_idx in range(self.num_classes):
@@ -274,13 +350,96 @@ class EthereumPricePredictionModel:
                 class_acc = np.mean(val_preds[mask] == y_val[mask])
                 per_class_acc.append(f"C{class_idx}:{class_acc:.3f}")
 
-        logger.info(f"{model_name} - Train: {train_acc:.4f} | Val: {val_acc:.4f} | Overfit: {(train_acc - val_acc):.4f}")
-        logger.info(f"{model_name} - Per-class Val Accuracy: {' | '.join(per_class_acc)}")
-        logger.debug(f"{model_name} val prediction distribution: {val_pred_dist}")
+        logger.info(f"[{model_name}] Completed in {training_time:.1f}s | Train: {train_acc:.4f} | Val: {val_acc:.4f} | Overfit: {(train_acc - val_acc):.4f}")
+        logger.info(f"[{model_name}] Per-class Val Acc: {' | '.join(per_class_acc)}")
+        logger.debug(f"[{model_name}] Val prediction distribution: {val_pred_dist}")
 
         return train_probs, val_probs
 
-    def _train_sklearn_model(self, model, X: np.ndarray, y: np.ndarray,
+    def _train_keras_model_with_pbar(self, model: Model, X: np.ndarray, y_train: np.ndarray,
+                          epochs: int = 1, batch_size: int = 32, model_name: str = "Model",
+                          train_split: float = 0.8, loss = CustomLoss(), pbar = None) -> tuple[np.ndarray, np.ndarray]:
+        """Train Keras model with train/validation split and progress bar"""
+        split_idx = int(len(X) * train_split)
+        X_tr = X[:split_idx]
+        X_val = X[split_idx:]
+        y_tr = y_train[:split_idx]
+        y_val = y_train[split_idx:]
+
+        class_weights = compute_class_weight(
+            class_weight='balanced',
+            classes=np.unique(y_tr),
+            y=y_tr
+        )
+        class_weight_dict = dict(enumerate(class_weights))
+
+        train_class_dist = dict(zip(*np.unique(y_tr, return_counts=True)))
+        val_class_dist = dict(zip(*np.unique(y_val, return_counts=True)))
+        logger.debug(f"[{model_name}] Class weights: {class_weight_dict}")
+        logger.debug(f"[{model_name}] Train distribution: {train_class_dist} | Val distribution: {val_class_dist}")
+
+        model.compile(
+            optimizer=AdamW(learning_rate=0.0001, weight_decay=0.01),
+            loss=loss,
+        )
+
+        class EpochProgressCallback(tf.keras.callbacks.Callback):
+            def __init__(self, pbar):
+                super().__init__()
+                self.pbar = pbar
+
+            def on_epoch_end(self, epoch, logs=None):
+                if self.pbar:
+                    loss = logs.get('loss', 0)
+                    val_loss = logs.get('val_loss', 0)
+                    self.pbar.set_postfix({'loss': f'{loss:.4f}', 'val_loss': f'{val_loss:.4f}'})
+                    self.pbar.update(1)
+
+        callbacks = []
+        if pbar:
+            callbacks.append(EpochProgressCallback(pbar))
+
+        training_start = time.time()
+        model.fit(
+            X_tr, y_tr,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_data=(X_val, y_val),
+            class_weight=class_weight_dict,
+            verbose=0,
+            callbacks=callbacks
+        )
+
+        training_time = time.time() - training_start
+
+        train_probs = model.predict(X_tr, verbose=0)
+        val_probs = model.predict(X_val, verbose=0)
+
+        train_preds = np.argmax(train_probs, axis=1)
+        val_preds = np.argmax(val_probs, axis=1)
+
+        train_acc = accuracy_score(y_tr, train_preds)
+        val_acc = accuracy_score(y_val, val_preds)
+
+        val_pred_dist = dict(zip(*np.unique(val_preds, return_counts=True)))
+
+        if len(val_pred_dist) == 1:
+            logger.warning(f"[{model_name}] Model collapse - only predicting class {list(val_pred_dist.keys())[0]}")
+
+        per_class_acc = []
+        for class_idx in range(self.num_classes):
+            mask = y_val == class_idx
+            if np.sum(mask) > 0:
+                class_acc = np.mean(val_preds[mask] == y_val[mask])
+                per_class_acc.append(f"C{class_idx}:{class_acc:.3f}")
+
+        logger.info(f"[{model_name}] Completed in {training_time:.1f}s | Train: {train_acc:.4f} | Val: {val_acc:.4f} | Overfit: {(train_acc - val_acc):.4f}")
+        logger.info(f"[{model_name}] Per-class Val Acc: {' | '.join(per_class_acc)}")
+        logger.debug(f"[{model_name}] Val prediction distribution: {val_pred_dist}")
+
+        return train_probs, val_probs
+
+    def _train_sklearn_model(self, model:XGBClassifier, X: np.ndarray, y: np.ndarray,
                             model_name: str = "Sklearn Model",
                             train_split: float = 0.8) -> tuple[np.ndarray, np.ndarray]:
         """Train sklearn model with train/validation split"""
@@ -288,15 +447,37 @@ class EthereumPricePredictionModel:
         X_tr = X[:split_idx].reshape(split_idx, -1)
         y_tr = y[:split_idx]
         X_val = X[split_idx:].reshape(len(X) - split_idx, -1)
+        y_val = y[split_idx:]
 
         training_start = time.time()
         model.fit(X_tr, y_tr)
         training_time = time.time() - training_start
 
-        logger.info(f"{model_name} training completed in {training_time:.1f}s")
-
         train_probs = model.predict_proba(X_tr)
         val_probs = model.predict_proba(X_val)
+
+        train_preds = np.argmax(train_probs, axis=1)
+        val_preds = np.argmax(val_probs, axis=1)
+
+        train_acc = accuracy_score(y_tr, train_preds)
+        val_acc = accuracy_score(y_val, val_preds)
+
+        val_pred_dist = dict(zip(*np.unique(val_preds, return_counts=True)))
+
+        if len(val_pred_dist) == 1:
+            logger.warning(f"[{model_name}] Model collapse - only predicting class {list(val_pred_dist.keys())[0]}")
+
+        per_class_acc = []
+        for class_idx in range(self.num_classes):
+            mask = y_val == class_idx
+            if np.sum(mask) > 0:
+                class_acc = np.mean(val_preds[mask] == y_val[mask])
+                per_class_acc.append(f"C{class_idx}:{class_acc:.3f}")
+
+        logger.info(f"[{model_name}] Completed in {training_time:.1f}s | Train: {train_acc:.4f} | Val: {val_acc:.4f} | Overfit: {(train_acc - val_acc):.4f}")
+        logger.info(f"[{model_name}] Per-class Val Acc: {' | '.join(per_class_acc)}")
+        logger.debug(f"[{model_name}] Val prediction distribution: {val_pred_dist}")
+
         return train_probs, val_probs
 
 
@@ -349,35 +530,31 @@ class EthereumPricePredictionModel:
         logger.info("Starting concurrent model training")
         logger.info("="*60)
 
+        n_epochs = 2
+
         training_start_time = time.time()
 
         results = {}
 
+        tcn_pbar = tqdm(total=n_epochs, desc="TCN Training", position=0, leave=True)
+        transformer_pbar = tqdm(total=n_epochs, desc="Transformer Training", position=1, leave=True)
+        xgb_pbar = tqdm(total=1, desc="XGBoost Training", position=2, leave=True)
+
         def train_tcn():
-            start_time = time.time()
             logger.info("[TCN] Training started")
-            result = self._train_keras_model(self.tcn_model, X_train, y_train, model_name="TCN")
-            elapsed = time.time() - start_time
-            logger.info(f"[TCN] Training completed in {elapsed:.1f}s")
+            result = self._train_keras_model_with_pbar(self.tcn_model, X_train, y_train, epochs=n_epochs, model_name="TCN", loss=SparseCategoricalCrossentropy(from_logits=False), pbar=tcn_pbar)
             results['tcn'] = result
 
         def train_transformer():
-            start_time = time.time()
             logger.info("[Transformer] Training started")
-            result = self._train_keras_model(self.transformer_model, X_train, y_train, model_name="Transformer", loss=SparseCategoricalCrossentropy)
-            elapsed = time.time() - start_time
-            logger.info(f"[Transformer] Training completed in {elapsed:.1f}s")
+            result = self._train_keras_model_with_pbar(self.transformer_model, X_train, y_train, epochs=n_epochs, model_name="Transformer", loss=SparseCategoricalCrossentropy(from_logits=False), pbar=transformer_pbar)
             results['transformer'] = result
 
         def train_xgb():
-            start_time = time.time()
             logger.info("[XGBoost] Training started")
             result = self._train_sklearn_model(self.xgb_model, X_train, y_train, model_name="XGBoost")
-            elapsed = time.time() - start_time
-            logger.info(f"[XGBoost] Training completed in {elapsed:.1f}s")
             results['xgb'] = result
-
-        main_pbar = tqdm(total=2, desc="Overall Progress", position=0, leave=True)
+            xgb_pbar.update(1)
 
         tcn_thread = threading.Thread(target=train_tcn)
         transformer_thread = threading.Thread(target=train_transformer)
@@ -391,30 +568,29 @@ class EthereumPricePredictionModel:
         transformer_thread.join()
         xgb_thread.join()
 
+        tcn_pbar.close()
+        transformer_pbar.close()
+        xgb_pbar.close()
+
         tcn_train_probs, tcn_val_probs = results['tcn']
         transformer_train_probs, transformer_val_probs = results['transformer']
         xgb_train_probs, xgb_val_probs = results['xgb']
 
-        main_pbar.update(1)
+        logger.info("-"*60)
+        logger.info("Sub-model validation summary:")
+        split_idx = int(len(y_train) * 0.8)
+        y_val_split = y_train[split_idx:]
 
-        logger.info("Sub-model evaluation on validation split:")
         for model_name, val_probs in zip(
             ['TCN', 'Transformer', 'XGBoost'],
             [tcn_val_probs, transformer_val_probs, xgb_val_probs]
         ):
             val_predictions = np.argmax(val_probs, axis=1)
-            split_idx = int(len(y_train) * 0.8)
-            y_val_split = y_train[split_idx:]
-
             accuracy = accuracy_score(y_val_split, val_predictions)
             f1_weighted = f1_score(y_val_split, val_predictions, average='weighted')
             f1_macro = f1_score(y_val_split, val_predictions, average='macro')
 
-            pred_dist = dict(zip(*np.unique(val_predictions, return_counts=True)))
-            pred_pct = {k: f"{(v/len(val_predictions)*100):.1f}%" for k, v in pred_dist.items()}
-
-            logger.info(f"{model_name} - Accuracy: {accuracy:.4f}, F1 (Weighted): {f1_weighted:.4f}, F1 (Macro): {f1_macro:.4f}")
-            logger.debug(f"{model_name} prediction distribution: {pred_pct}")
+            logger.info(f"[{model_name}] Acc: {accuracy:.4f} | F1-W: {f1_weighted:.4f} | F1-M: {f1_macro:.4f}")
 
         train_meta_features = np.hstack((
             tcn_train_probs, transformer_train_probs, xgb_train_probs
@@ -428,32 +604,47 @@ class EthereumPricePredictionModel:
         y_train_split = y_train[:split_idx]
         y_val_split = y_train[split_idx:]
 
+        logger.info("-"*60)
         logger.info("[Meta-Classifier] Training started")
+        meta_pbar = tqdm(total=1, desc="Meta-Classifier Training", position=0, leave=True)
         meta_start = time.time()
         self.meta_model = self._build_meta_model()
-        self.meta_model.fit(train_meta_features, y_train_split)
+
+        if self.classification_config.classifier_model_type in ['mlp']:
+            self.meta_model.fit(
+                train_meta_features, y_train_split,
+                epochs=100,
+                batch_size=32,
+                validation_data=(val_meta_features, y_val_split),
+                verbose=0
+            )
+            val_probs = self.meta_model.predict(val_meta_features, verbose=0)
+            val_predictions = np.argmax(val_probs, axis=1)
+        else:
+            self.meta_model.fit(train_meta_features, y_train_split)
+            val_predictions = self.meta_model.predict(val_meta_features)
+
         meta_elapsed = time.time() - meta_start
-        logger.info(f"[Meta-Classifier] Training completed in {meta_elapsed:.1f}s")
+        meta_accuracy = accuracy_score(y_val_split, val_predictions)
+        logger.info(f"[Meta-Classifier] Completed in {meta_elapsed:.1f}s | Val Acc: {meta_accuracy:.4f}")
+        meta_pbar.update(1)
+        meta_pbar.close()
 
-        main_pbar.update(1)
-        main_pbar.close()
-
-        total_time = time.time() - training_start_time
-        logger.info("="*60)
-        logger.info(f"Training completed in {total_time:.1f}s")
-        logger.info("="*60)
-
-        val_predictions = self.meta_model.predict(val_meta_features)
         self.training_predictions = val_predictions
         self.training_labels = y_val_split
 
+        total_time = time.time() - training_start_time
+
         train_split_pct = len(y_train_split)/len(y_train)*100
         val_split_pct = len(y_val_split)/len(y_train)*100
-        logger.info(f"Training split: {len(y_train_split)} ({train_split_pct:.1f}%)")
-        logger.info(f"Validation split: {len(y_val_split)} ({val_split_pct:.1f}%)")
+
+        logger.info("="*60)
+        logger.info(f"Training completed in {total_time:.1f}s")
+        logger.info(f"Training split: {len(y_train_split)} ({train_split_pct:.1f}%) | Validation split: {len(y_val_split)} ({val_split_pct:.1f}%)")
         logger.debug(f"Training labels: {dict(zip(*np.unique(y_train_split, return_counts=True)))}")
         logger.debug(f"Validation labels: {dict(zip(*np.unique(y_val_split, return_counts=True)))}")
         logger.info(f"Validation predictions: {dict(zip(*np.unique(val_predictions, return_counts=True)))}")
+        logger.info("="*60)
 
         self.is_trained = True
 
@@ -486,10 +677,6 @@ class EthereumPricePredictionModel:
         transformer_probs: np.ndarray = self.transformer_model.predict(X, verbose=0)
         xgb_probs: np.ndarray = self.xgb_model.predict_proba(X)
 
-        logger.debug(f"Sample TCN probabilities: {tcn_probs[:3]}")
-        logger.debug(f"Sample Transformer probabilities: {transformer_probs[:3]}")
-        logger.debug(f"Sample XGB probabilities: {xgb_probs[:3]}")
-
         tcn_preds = np.argmax(tcn_probs, axis=1)
         transformer_preds = np.argmax(transformer_probs, axis=1)
         xgb_preds = np.argmax(xgb_probs, axis=1)
@@ -498,12 +685,21 @@ class EthereumPricePredictionModel:
         transformer_dist = dict(zip(*np.unique(transformer_preds, return_counts=True)))
         xgb_dist = dict(zip(*np.unique(xgb_preds, return_counts=True)))
 
-        logger.info(f"TCN predictions: {', '.join([f'C{k}: {v/len(tcn_preds)*100:.1f}%' for k, v in tcn_dist.items()])}")
-        logger.info(f"Transformer predictions: {', '.join([f'C{k}: {v/len(transformer_preds)*100:.1f}%' for k, v in transformer_dist.items()])}")
-        logger.info(f"XGB predictions: {', '.join([f'C{k}: {v/len(xgb_preds)*100:.1f}%' for k, v in xgb_dist.items()])}")
+        logger.info(f"[TCN] Predictions: {', '.join([f'C{k}: {v/len(tcn_preds)*100:.1f}%' for k, v in tcn_dist.items()])}")
+        logger.info(f"[Transformer] Predictions: {', '.join([f'C{k}: {v/len(transformer_preds)*100:.1f}%' for k, v in transformer_dist.items()])}")
+        logger.info(f"[XGBoost] Predictions: {', '.join([f'C{k}: {v/len(xgb_preds)*100:.1f}%' for k, v in xgb_dist.items()])}")
+
+        logger.debug(f"[TCN] Sample probabilities: {tcn_probs[:3]}")
+        logger.debug(f"[Transformer] Sample probabilities: {transformer_probs[:3]}")
+        logger.debug(f"[XGBoost] Sample probabilities: {xgb_probs[:3]}")
 
         meta_features: np.ndarray = np.hstack((tcn_probs, transformer_probs, xgb_probs))
-        final_predictions = self.meta_model.predict(meta_features)
+
+        if self.classification_config.classifier_model_type in ['mlp']:
+            meta_probs = self.meta_model.predict(meta_features, verbose=0)
+            final_predictions = np.argmax(meta_probs, axis=1)
+        else:
+            final_predictions = self.meta_model.predict(meta_features)
 
         return {'final_predictions': final_predictions,
                 'submodel_predictions': meta_features}
@@ -818,66 +1014,6 @@ Backtesting:
             'percent_invested': percent_days_invested,
             'num_intervals': len(model_capital)
         }
-
-    def save_model(self, filepath):
-        """
-        Save the trained model to disk.
-
-        Args:
-            filepath (str): Path to save the model
-        """
-        if not self.is_trained:
-            raise ValueError("Model must be trained before saving")
-
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-
-        # Save model components
-        model_data = {
-            'window_length': self.window_length,
-            'num_classes': self.num_classes,
-            'meta_classifier': self.meta_classifier,
-            'random_seed': self.random_seed,
-            'feature_columns': self.feature_columns,
-            'label_thresholds': self.label_thresholds,
-            'is_trained': self.is_trained,
-            'classification_config': self.classification_config,
-            'scaler': self.scaler
-        }
-
-        # Save Keras models
-        self.tcn_model.save(f"{filepath}_tcn.keras")
-        self.transformer_model.save(f"{filepath}_transformer.keras")
-
-        # Save sklearn models
-        joblib.dump(self.xgb_model, f"{filepath}_xgb.pkl")
-        joblib.dump(self.meta_model, f"{filepath}_meta.pkl")
-
-        # Save metadata
-        with open(f"{filepath}_metadata.pkl", 'wb') as f:
-            pickle.dump(model_data, f)
-
-
-    def save_tf_models(self, filepath):
-        """
-        Save only the TensorFlow models to disk.
-
-        Args:
-            filepath (str): Base path to save the TensorFlow models
-        """
-        if not self.is_trained:
-            raise ValueError("Model must be trained before saving")
-
-        if self.tcn_model is None or self.transformer_model is None:
-            raise ValueError("TensorFlow models are not initialized")
-
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-
-        # Save TensorFlow models
-        self.tcn_model.save(f"{filepath}_tcn.keras")
-        self.transformer_model.save(f"{filepath}_transformer.keras")
-
 
     def calculate_historical_backtesting(self, predictions_df: pd.DataFrame) -> pd.DataFrame:
         """

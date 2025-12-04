@@ -40,6 +40,10 @@ class ClassificationConfig(BaseModel):
         default=False,
         description="Whether to invest when label equals median (for odd num_classes)"
     )
+    classifier_model_type: str = Field(
+        default="xgb",
+        description="Meta-classifier model type: 'xgb', 'svm', 'ml'",
+    )
 
     @field_validator('custom_thresholds')
     @classmethod
@@ -120,7 +124,7 @@ def engineer_features(config: DataConfig) -> DataFrame:
     for file in os.listdir(data_dir):
         if file.endswith('_aggregated.csv'):
             aggregated_results = pd.read_csv(f"data/aggregated/{file}")
-            logger.info(f'Starting Engineering with file {aggregated_results}')
+            logger.info(f'Starting Engineering with file {file}')
 
     # Ensure interval times are aligned to hour boundaries
     aggregated_results['interval_start'] = pd.to_datetime(aggregated_results['interval_start']).dt.floor('h')
@@ -135,11 +139,10 @@ def engineer_features(config: DataConfig) -> DataFrame:
 
     results_with_price = aggregated_results.merge(price_history, left_on='interval_start', right_on='datetime', how='inner')
     results_with_price.sort_values(by='datetime', inplace=True)
-    print(f"Unmerged Shapes{aggregated_results.shape} x {price_history.shape} :: Merged shape: {results_with_price.shape}")
 
-    print(aggregated_results.head(2))
-    print(price_history[price_history['datetime'] > aggregated_results['interval_start'].min()].head(2))
-    print(results_with_price.head(2))
+    # print(aggregated_results.head(2))
+    # print(price_history[price_history['datetime'] > aggregated_results['interval_start'].min()].head(2))
+    # print(results_with_price.head(2))
 
     # Use ClassificationConfig if provided, otherwise use legacy parameters
     if config.classification_config is not None:

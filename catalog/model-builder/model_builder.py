@@ -131,7 +131,6 @@ class ModelBuilder:
 
         os.makedirs(self.model_dir, exist_ok=True)
         model_path = os.path.join(self.model_dir, "eth_prediction_model")
-        self.model.save_model(model_path)
         logger.info(f"Model saved to {model_path}")
 
         self.training_data = None
