@@ -9,4 +9,4 @@ data/
 CLAUDE.md
 
 
-models/
+models/*

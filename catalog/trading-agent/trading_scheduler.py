@@ -21,12 +21,12 @@ class EthereumExtractionScheduler:
         self.extraction_thread = None
         self._setup_signal_handlers()
         
-    def _setup_logging(self):
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            format='%(asctime)s - %(levelname)-8s - %(name)s - %(message)s',
+            datefmt='%H:%M:%S',
             handlers=[
-                logging.FileHandler("eth_scheduler.log"),
+                logging.FileHandler("logs/vm_orchestrator.log"),
                 logging.StreamHandler()
             ]
         )

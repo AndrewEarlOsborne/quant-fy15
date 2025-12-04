@@ -32,7 +32,7 @@ class Orchestrator:
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)-8s - %(name)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S',
+            datefmt='%H:%M:%S',
             handlers=[
                 logging.FileHandler("logs/vm_orchestrator.log"),
                 logging.StreamHandler()

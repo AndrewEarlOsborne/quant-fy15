@@ -5,14 +5,71 @@ import pandas as pd
 from pandas import DataFrame
 import numpy as np
 import matplotlib.pyplot as plt
-from pydantic import Field, BaseModel
+from pydantic import Field, BaseModel, field_validator
 import logging
+from typing import Optional, List, Callable
+
+class ClassificationConfig(BaseModel):
+    num_classes: int = Field(default=3, ge=2, description="Number of classification labels (2+)")
+    label_strategy: str = Field(
+        default="percentile",
+        description="Labeling strategy: 'percentile', 'linspace', 'centered-linspace', 'stddev', 'custom'"
+    )
+    custom_thresholds: Optional[List[float]] = Field(
+        default=None,
+        description="Custom threshold values for 'custom' label strategy (must have num_classes-1 values)"
+    )
+    decision_strategy: str = Field(
+        default="median-split",
+        description="Decision strategy: 'median-split', 'threshold', 'top-k', 'confidence-weighted'"
+    )
+    decision_threshold: Optional[float] = Field(
+        default=None,
+        description="Threshold for 'threshold' decision strategy (0.0-1.0 as fraction of num_classes)"
+    )
+    decision_top_k: Optional[int] = Field(
+        default=None,
+        description="Number of top classes to invest for 'top-k' strategy"
+    )
+    median_label_invest: bool = Field(
+        default=False,
+        description="Whether to invest when label equals median (for odd num_classes)"
+    )
+
+    @field_validator('custom_thresholds')
+    @classmethod
+    def validate_custom_thresholds(cls, v, info):
+        if v is not None:
+            num_classes = info.data.get('num_classes', 3)
+            if len(v) != num_classes - 1:
+                raise ValueError(f"custom_thresholds must have exactly {num_classes-1} values for {num_classes} classes")
+            if v != sorted(v):
+                raise ValueError("custom_thresholds must be in ascending order")
+        return v
+
+    def get_decision_function(self) -> Callable[[int], bool]:
+        """
+        Returns a decision function that takes a predicted label and returns whether to invest.
+
+        Returns:
+            Callable[[int], bool]: Function that takes label index and returns investment decision
+        """
+
+        threshold = self.num_classes // 2
+        if self.num_classes % 2 == 1:
+            return lambda label: label > threshold if not self.median_label_invest else label >= threshold
+        else:
+            return lambda label: label >= threshold
 
 class DataConfig(BaseModel):
     num_classes:int = Field(default = 3, description= "Number of classifications that price can be split into.")
     label_strategy:str = Field(default = "linspace", description= "Strategy for generating labels. Options: 'linspace', 'equal-index'")
     do_balancing:bool = Field(default = False, description = "Boolean indicating if data engineering should curtail the data so that all classifications have equal frequency.")
     window_length:int = Field(default = 10, description = "Length of sliding windows for time series features")
+    classification_config: Optional[ClassificationConfig] = Field(
+        default=None,
+        description="Classification configuration (overrides num_classes and label_strategy if provided)"
+    )
     
 
 def engineer_features(config: DataConfig) -> DataFrame:
@@ -44,9 +101,20 @@ def engineer_features(config: DataConfig) -> DataFrame:
     print(price_history[price_history['datetime'] > aggregated_results['interval_start'].min()].head(2))
     print(results_with_price.head(2))
 
-    # Make labels
-    logger.info(f"Making {config.num_classes} labels using {config.label_strategy}.")
-    labeled_data:pd.DataFrame = make_labels(results_with_price.copy(), config.num_classes, config.label_strategy)
+    # Use ClassificationConfig if provided, otherwise use legacy parameters
+    if config.classification_config is not None:
+        num_classes = config.classification_config.num_classes
+        clf_config = config.classification_config
+        logger.info(f"Making {num_classes} labels using {clf_config.label_strategy} strategy.")
+        labeled_data = make_labels(
+            results_with_price.copy(),
+            num_labels=num_classes,
+            strategy=clf_config.label_strategy,
+            custom_thresholds=clf_config.custom_thresholds
+        )
+    else:
+        logger.info(f"Making {num_classes} labels using {config.label_strategy}.")
+        labeled_data = make_labels(results_with_price.copy(), num_classes, config.label_strategy)
 
     # results_with_price['volume_m_avg'] = results_with_price['volume'].rolling(window=config.window_length, min_periods=1).mean()
 
@@ -75,9 +143,7 @@ def engineer_features(config: DataConfig) -> DataFrame:
     # Select features and build windows.
     labeled_data = labeled_data[X_features + ['label', 'delta']]
 
-    # print(f"Engineered nrows: {labeled_data.shape[0]}")
-
-    windowed_features = ['delta', 'validator_count', 'whale_avg_value_eth']
+    windowed_features = ['validator_count', 'whale_avg_value_eth']
     result_df = build_window_features(labeled_data, windowed_features, config.window_length)
 
     return result_df
@@ -135,7 +201,7 @@ def get_price_features(config) -> DataFrame:
     hist_data['price'] = hist_data['price'].interpolate(method='linear', limit_direction='both')
 
     # Price change features
-    hist_data['delta'] = hist_data['price'].pct_change()
+    hist_data['delta'] = hist_data['price'].pct_change().shift(-1)
     # hist_data['lag1_delta'] = hist_data['delta'].shift(1, fill_value=0)
     # hist_data['lag2_delta'] = hist_data['delta'].shift(2, fill_value=0)
 
@@ -151,61 +217,100 @@ def get_price_features(config) -> DataFrame:
     return hist_data
 
 
-def make_labels(data:DataFrame, num_labels: int = 3, strategy="linspace") -> DataFrame:
-    """Generate labels based on price changes.
+def make_labels(data:DataFrame, num_labels: int = 3, strategy="linspace", custom_thresholds: Optional[List[float]] = None) -> DataFrame:
+    """Generate labels based on price changes using various strategies.
 
-    Labels are roughly even in count, and logging should report this. """
+    Args:
+        data: DataFrame with 'delta' column containing price changes
+        num_labels: Number of classification labels (2+)
+        strategy: Labeling strategy - 'percentile', 'linspace', 'centered-linspace', 'stddev', 'custom'
+        custom_thresholds: List of threshold values for 'custom' strategy (must have num_labels-1 values)
+
+    Returns:
+        DataFrame with added 'label' column
+
+    Strategies:
+        - percentile: Equal-frequency bins based on percentiles (recommended for balanced classes)
+        - linspace: Same as percentile (legacy name)
+        - centered-linspace: Bins centered around zero (symmetric for price changes)
+        - stddev: Bins based on standard deviations (e.g., ±0.5σ, ±1σ, ±2σ)
+        - custom: User-defined threshold values
+    """
 
     logger = logging.getLogger(__name__)
     df = data.copy()
 
-    # Calculate price changes (delta)
-
-    # Remove NaN values for labeling
     valid_deltas:pd.Series = df['delta'].dropna()
 
-    splits: list
+    if valid_deltas.empty:
+        raise ValueError("No valid delta values found for labeling")
 
-    if strategy == 'linspace':
-        # Create quantile-based labels
+    splits: list = []
+
+    if strategy in ['linspace', 'percentile']:
         quantiles = np.linspace(0, 1, num_labels + 1)
-        splits = valid_deltas.quantile(quantiles[1:-1]).values
-        splits.sort
+        splits = valid_deltas.quantile(quantiles[1:-1]).values.tolist()
 
-    if strategy == 'centered-linspace':
-        # Build bins starting with a split or a bin center on 0
+    elif strategy == 'centered-linspace':
         splits = []
         if num_labels % 2 == 0:
-            #Even bins, start at 0, move splits out
-            k = num_labels / 2
-            max_delta =  valid_deltas.sort_values().max()
+            k = num_labels // 2
+            max_delta = valid_deltas.abs().max()
             bin_length = max_delta / k
+            for i in range(1, k):
+                splits.append(-max_delta + i * bin_length)
+            splits.append(0)
+            for i in range(1, k):
+                splits.append(i * bin_length)
+        else:
+            k = num_labels // 2
+            max_delta = valid_deltas.abs().max()
+            bin_length = max_delta / (k + 0.5)
+            for i in range(k):
+                splits.append(-(k - i) * bin_length)
+            for i in range(k):
+                splits.append((i + 1) * bin_length)
 
-            [splits.append(x * bin_length) for x in range(k)]
+    elif strategy == 'stddev':
+        mean = valid_deltas.mean()
+        std = valid_deltas.std()
 
-        if num_labels % 2 == 1:
-            #Even bins, start at 0, move splits out
+        if num_labels == 3:
+            splits = [mean - 0.5 * std, mean + 0.5 * std]
+        elif num_labels == 5:
+            splits = [mean - std, mean - 0.5 * std, mean + 0.5 * std, mean + std]
+        elif num_labels == 7:
+            splits = [mean - 2*std, mean - std, mean - 0.5*std, mean + 0.5*std, mean + std, mean + 2*std]
+        else:
+            num_splits = num_labels - 1
+            sigma_range = np.linspace(-2, 2, num_splits)
+            splits = [mean + s * std for s in sigma_range]
 
-            k:int = num_labels // 2
-            max_delta:float =  valid_deltas.sort_values().max()
-            bin_length:float = max_delta / float(k)
+    elif strategy == 'custom':
+        if custom_thresholds is None:
+            raise ValueError("custom_thresholds must be provided for 'custom' strategy")
+        if len(custom_thresholds) != num_labels - 1:
+            raise ValueError(f"custom_thresholds must have {num_labels-1} values for {num_labels} classes")
+        splits = sorted(custom_thresholds)
 
-            [splits.append((x + bin_length/2) * bin_length) for x in range(k)]
+    else:
+        raise ValueError(f"Unknown label strategy: {strategy}")
 
-    splits.sort()
+    splits = sorted(splits)
 
     df['label'] = pd.cut(df['delta'],
-                        bins=[-np.inf] + list(splits) + [np.inf],
+                        bins=[-np.inf] + splits + [np.inf],
                         labels=list(range(num_labels)),
                         include_lowest=True)
 
-    # Log label distribution
     if 'label' in df.columns:
         label_counts = df['label'].value_counts().sort_index()
-        logger.info(f"Label distribution: {dict(label_counts)}")
-        # for i, count in enumerate(label_counts):
-        #     pct = count / len(df['label'].dropna()) * 100
-        #     logger.info(f"Label {i}: {count} samples ({pct:.1f}%)")
+        total = len(df['label'].dropna())
+        logger.info(f"Label distribution ({strategy} strategy):")
+        for label, count in label_counts.items():
+            pct = (count / total) * 100
+            logger.info(f"  Label {label}: {count} samples ({pct:.1f}%)")
+        logger.info(f"Label thresholds: {[f'{s:.6f}' for s in splits]}")
 
     return df
         
